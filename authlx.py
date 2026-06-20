@@ -96,7 +96,13 @@ class api:
             logger.info(response.get("message", "Successfully registered!"))
             return True
         else:
-            logger.info(response.get("message", "Registration failed."))
+            msg = response.get("message", "Registration failed.")
+            logger.error(f"Registration Failed: {msg}")
+            
+            if "Application not found" in msg:
+                logger.critical(f"\n[SETUP ERROR] The ownerid (App ID) provided in the SDK is incorrect.")
+                logger.critical(f"[RESOLUTION] Check your AuthLX Dashboard and copy the exact App ID.\n")
+            
             return False
 
     def login(self, user, password, hwid=None):
@@ -122,7 +128,23 @@ class api:
             logger.info("Successfully logged in!")
             return True
         else:
-            logger.info(response.get("message", "Login failed."))
+            msg = response.get("message", "Login failed.")
+            logger.error(f"Login Failed: {msg}")
+            
+            # --- IMPORTANT SETUP ERROR RESOLUTIONS ---
+            if "Application hash invalid or modified" in msg or "Application hash required" in msg:
+                logger.critical(f"\n[SETUP ERROR] You enabled 'Hash Check' in AuthLX, but haven't whitelisted this script's hash!")
+                logger.critical(f"[RESOLUTION] Go to AuthLX Dashboard -> Your App -> Security -> Add this hash: {self.hash_to_check}\n")
+            elif "Application not found" in msg:
+                logger.critical(f"\n[SETUP ERROR] The ownerid (App ID) provided in the SDK is incorrect.")
+                logger.critical(f"[RESOLUTION] Check your AuthLX Dashboard and copy the exact App ID.\n")
+            elif "Hardware ID mismatch" in msg:
+                logger.critical(f"\n[USER ERROR] The user's hardware ID has changed.")
+                logger.critical(f"[RESOLUTION] The user needs to request an HWID reset from the AuthLX Dashboard.\n")
+            elif "Application is currently disabled" in msg:
+                logger.critical(f"\n[SETUP ERROR] Your application is disabled.")
+                logger.critical(f"[RESOLUTION] Go to AuthLX Dashboard and set your app to Active.\n")
+                
             return False
 
     def check(self):
