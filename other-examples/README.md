@@ -1,26 +1,65 @@
-# Other-Examples
-ExistAuth Python Examples
+# AuthLX Python SDK – Other Examples
 
-**merged_example.py**
+These files show three different ways to integrate the AuthLX Python SDK into
+your own application.  All three use the same `api` and `others` classes from
+`authlx.py`; they differ only in *how* your application code is structured
+relative to the authentication gate.
 
-Yes title says everything. This file contains the `existauth.py` and `main.py` from https://github.com/ExistAuth/ExistAuth-Python-Example
+---
 
-A few people did not know how to merge the files, so I made an example.
+## Files
 
-**method1.py**
+### `merged_example.py`
 
-This file shows you how to add your program to existauth example.
+A single self-contained script that bundles the entire SDK and the example
+application into **one file**.  Useful if you want zero file-management
+overhead — just open this file, set your `APP_ID`, and add your code.
 
-All you have to do is copy and paste your code below the example, you can check it in the `method1.py` file.
+### `method1.py` ✅ Recommended
 
-**method2.py**
+**Your code sits below the login call.**
 
-This file shows you how to use your code if it's above the example code.
+The login gate is the very first thing that runs.  Your protected logic lives
+inside `run_app()`, which is only called when `login()` returns `True`.
+There is no way to reach your code without passing authentication.
 
-- This method will only work if you call your functions after login.
-- **Example:**
-Create 1 function that will call all the other needed functions. You can also create 1 function and put everything in it. This is all your choice, method 1 would be a better idea.
-- This can be exploited with Python code injection, for example injecting a code that will call the function before login.
+```
+main()
+  └─ login()  ─── ✓ success ──→  run_app()   ← your code here
+               └─ ✗ fail   ──→  "Login failed."
+```
 
+### `method2.py` ⚠ Use with caution
 
->Created by: `Marci#1337`
+**Your functions are defined above `main()`, then called after login.**
+
+Useful if you need to define functions at module scope before the `api`
+object is created.  Since the functions are technically callable from anywhere,
+**always call `authlxapp.check()` at the top of every protected function** to
+re-verify the session.
+
+```
+def protected_feature(authlxapp):
+    if not authlxapp.check():   # ← always include this guard
+        return
+    ...                         ← your code here
+
+main()
+  └─ login()  ─── ✓ success ──→  protected_feature(authlxapp)
+               └─ ✗ fail   ──→  "Login failed."
+```
+
+---
+
+## Which method should I use?
+
+| Factor                          | Method 1       | Method 2           |
+|---------------------------------|----------------|--------------------|
+| Simplicity                      | ✅ Simpler      | Moderate           |
+| Security (tamper resistance)    | ✅ Stronger     | Requires `check()` |
+| Functions defined before `api`  | Not needed     | ✅ Supported        |
+| Recommended for most projects   | ✅ Yes          | Special cases only |
+
+---
+
+*Docs / Source: https://github.com/AuthLX/AuthLX-Python-Example*
