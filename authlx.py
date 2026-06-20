@@ -5,7 +5,15 @@ import time
 import platform
 import subprocess
 import hashlib
-import threading
+import logging
+
+# Set up SDK Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] AuthLX: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("AuthLX")
 
 try:
     if os.name == 'nt':
@@ -20,7 +28,7 @@ except ModuleNotFoundError:
         if os.name == 'nt':
             os.system("pip install pywin32")
         os.system("pip install requests")
-    print("Modules installed!")
+    logger.info("Modules installed!")
     time.sleep(1.5)
     os._exit(1)
 
@@ -85,10 +93,10 @@ class api:
         response = self.__do_request("/register", post_data)
 
         if response and response.get("status") == "success":
-            print(response.get("message", "Successfully registered!"))
+            logger.info(response.get("message", "Successfully registered!"))
             return True
         else:
-            print(response.get("message", "Registration failed."))
+            logger.info(response.get("message", "Registration failed."))
             return False
 
     def login(self, user, password, hwid=None):
@@ -111,10 +119,10 @@ class api:
             data = response.get("data", {})
             self.session_token = data.get("token")
             self.__load_user_data(data.get("user", {}))
-            print("Successfully logged in!")
+            logger.info("Successfully logged in!")
             return True
         else:
-            print(response.get("message", "Login failed."))
+            logger.info(response.get("message", "Login failed."))
             return False
 
     def check(self):
@@ -146,16 +154,16 @@ class api:
         response = self.__do_request("/verify-token", post_data)
         
         if response and response.get("status") == "success":
-            print("Token is valid!")
+            logger.info("Token is valid!")
             return True
         else:
-            print(response.get("message", "Invalid or banned token."))
+            logger.error(response.get("message", "Invalid or banned token."))
             return False
 
     def logout(self):
         self.checkinit()
         if not self.session_token:
-            print("Not logged in.")
+            logger.error("Not logged in.")
             return False
 
         post_data = {
@@ -166,16 +174,16 @@ class api:
         response = self.__do_request("/logout", post_data)
 
         if response and response.get("status") == "success":
-            print(response.get("message", "Successfully logged out!"))
+            logger.info(response.get("message", "Successfully logged out!"))
             self.session_token = ""
             return True
         else:
-            print(response.get("message", "Logout failed."))
+            logger.error(response.get("message", "Logout failed."))
             return False
 
     def checkinit(self):
         if not self.initialized:
-            print("Initialize first, in order to use the functions")
+            logger.warning("Initialize first, in order to use the functions")
             time.sleep(3)
             os._exit(1)
 
@@ -236,7 +244,7 @@ class others:
     def anti_debug():
         """Kills the process if a standard Python debugger is attached"""
         if sys.gettrace() is not None:
-            print("Security violation: Debugger detected.")
+            logger.critical("Security violation: Debugger detected.")
             os._exit(1)
 
     @staticmethod
