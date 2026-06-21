@@ -140,6 +140,7 @@ class api:
         # Authentication state
         self.session_token: str = ""
         self.initialized: bool = False
+        self.hwid_method: str = "windows_user"
         self.user_data = self.user_data_class()
 
         # Rate limiting
@@ -194,6 +195,7 @@ class api:
                 os._exit(1)
 
             self.initialized = True
+            self.hwid_method = app_info.get("hwid_method", "windows_user")
         else:
             logger.error("Failed to initialise application. Check your ownerid and network.")
             os._exit(1)
@@ -221,7 +223,7 @@ class api:
         """
         self._checkinit()
         if hwid is None:
-            hwid = others.get_hwid()
+            hwid = others.get_hwid(method=self.hwid_method)
 
         response = self._do_request(
             "/register",
@@ -261,7 +263,7 @@ class api:
         """
         self._checkinit()
         if hwid is None:
-            hwid = others.get_hwid()
+            hwid = others.get_hwid(method=self.hwid_method)
 
         response = self._do_request(
             "/login",
@@ -506,7 +508,7 @@ class api:
         """
         self._checkinit()
         if hwid is None:
-            hwid = others.get_hwid()
+            hwid = others.get_hwid(method=self.hwid_method)
 
         response = self._do_request(
             "/forgot",
@@ -959,12 +961,12 @@ class others:
             os._exit(1)
 
     @staticmethod
-    def get_hwid() -> str:
+    def get_hwid(method: str = "windows_user") -> str:
         """
         Return a stable Hardware ID for the current machine:
 
         - **Linux**:   ``/etc/machine-id``
-        - **Windows**: User SID via ``win32security``
+        - **Windows**: MachineGuid or wmic UUID, or User SID depending on method.
         - **macOS**:   IOPlatformSerialNumber via ``ioreg``
 
         :returns: Hardware ID string, or a platform-specific fallback on error.
@@ -979,18 +981,30 @@ class others:
                 return "Unknown-Linux-HWID"
 
         if system == "Windows":
-            try:
-                import winreg
-                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
-                    hwid, _ = winreg.QueryValueEx(key, "MachineGuid")
-                return hwid
-            except Exception:
+            if method == "windows_user":
                 try:
-                    import subprocess
-                    hwid = subprocess.check_output("wmic csproduct get uuid").decode().split('\n')[1].strip()
+                    import win32security  # type: ignore
+                    user, domain, _ = win32security.LookupAccountName("", win32security.GetUserNameEx(2))
+                    return win32security.ConvertSidToStringSid(user)
+                except Exception:
+                    try:
+                        hwid = subprocess.check_output("whoami /user").decode().split("\n")[-2].split()[-1]
+                        return hwid
+                    except Exception:
+                        return "Unknown-Windows-SID"
+            else:
+                try:
+                    import winreg
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                        hwid, _ = winreg.QueryValueEx(key, "MachineGuid")
                     return hwid
                 except Exception:
-                    return "Unknown-Windows-HWID"
+                    try:
+                        import subprocess
+                        hwid = subprocess.check_output("wmic csproduct get uuid").decode().split('\n')[1].strip()
+                        return hwid
+                    except Exception:
+                        return "Unknown-Windows-HWID"
 
         if system == "Darwin":
             try:
