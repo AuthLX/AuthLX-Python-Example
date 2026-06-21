@@ -980,11 +980,17 @@ class others:
 
         if system == "Windows":
             try:
-                winuser = os.getlogin()
-                sid = win32security.LookupAccountName(None, winuser)[0]
-                return win32security.ConvertSidToStringSid(sid)
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                    hwid, _ = winreg.QueryValueEx(key, "MachineGuid")
+                return hwid
             except Exception:
-                return "Unknown-Windows-HWID"
+                try:
+                    import subprocess
+                    hwid = subprocess.check_output("wmic csproduct get uuid").decode().split('\n')[1].strip()
+                    return hwid
+                except Exception:
+                    return "Unknown-Windows-HWID"
 
         if system == "Darwin":
             try:
