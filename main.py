@@ -19,8 +19,8 @@ from authlx import api, others
 # ---------------------------------------------------------------------------
 # ★  CONFIGURATION  – fill in your details from the AuthLX Dashboard
 # ---------------------------------------------------------------------------
-APP_NAME    = "MyApp"
-APP_ID      = "YOUR-APP-UUID-HERE"    # ← paste your App UUID here
+APP_NAME    = "Premium"
+APP_ID      = "28ec87e8-ffec-404a-aad3-29ec468c765c"    # ← paste your App UUID here
 APP_VERSION = "1.0"
 
 # Use others.get_checksum() to enable server-side integrity verification.

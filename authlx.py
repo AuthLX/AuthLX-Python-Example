@@ -131,7 +131,7 @@ class api:
         self.hash_to_check = (
             hash_to_check if hash_to_check is not None else others.get_checksum()
         )
-        self.api_url = api_url or "https://api.authlx.com/api/v1/client"
+        self.api_url = api_url or "https://authlx.com/api/v1/client"
 
         # Per-instance HTTP session
         self._session = requests.Session()

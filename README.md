@@ -124,7 +124,7 @@ AuthLX-Python-Example/
 
 5. **Ban Monitor** — call `start_ban_monitor()` after login to run a background daemon that periodically calls `check()`.  If the session is revoked (e.g. by an admin ban), the process exits immediately via `os._exit(1)`.
 
-6. **Host Locking** — call `set_allowed_hosts(["api.authlx.com"])` to restrict all HTTP requests made through the SDK to approved domains only.
+6. **Host Locking** — call `set_allowed_hosts(["authlx.com"])` to restrict all HTTP requests made through the SDK to approved domains only.
 
 ---
 
