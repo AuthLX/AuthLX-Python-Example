@@ -3,38 +3,100 @@ AuthLX Python SDK
 =================
 A production-ready client SDK for the AuthLX authentication platform.
 
-Provides user authentication (login, register, web-login, logout),
-license management, session verification, and a full suite of runtime
-security features:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  QUICK START
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  • HWID Locking          – binds accounts to physical hardware IDs
-  • Anti-Tamper           – SHA-256 checksum of the running executable
-  • Anti-Debug            – detects attached Python debuggers
-  • Anti-MITM             – disables proxy auto-configuration
-  • Host Locking          – blocks requests to non-whitelisted domains
-  • Public-Key Pinning    – (hook point) validates TLS certificate pins
-  • Payload Cryptography  – HMAC seal + XOR field encryption helpers
-  • Ban Monitor           – background thread that revokes sessions on bans
-  • Rate Limiting         – client-side brute-force lockout (3 fails → 5 min)
+  from authlx import api, others
 
-GitHub: https://github.com/AuthLX/AuthLX-Python-Example
+  authlxapp = api(
+      name          = "MyApp",
+      ownerid       = "YOUR-APP-UUID",          # AuthLX Dashboard → App Info
+      version       = "1.0",
+      client_secret = "YOUR-CLIENT-SECRET",     # AuthLX Dashboard → App Info → Client Secret
+  )
+
+  if authlxapp.login("alice", "password123"):
+      print("Logged in as", authlxapp.user_data.username)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ANTI-TAMPER: TWO MODES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  MODE 1 — SECURE  (client_secret provided — RECOMMENDED)
+  ─────────────────────────────────────────────────────────
+  • Every login/register automatically sends:
+      hash           = SHA-256 of this .py or .exe
+      hash_signature = HMAC-SHA256(hash:timestamp:nonce, client_secret)
+      hash_timestamp = current Unix time (5-minute expiry window)
+      hash_nonce     = random 32-hex string (single-use, 10-min block)
+  • Backend verifies all three fields before allowing login.
+  • If signature is valid, the hash is AUTO-WHITELISTED — no manual
+    dashboard work needed, even after every new build.
+  • Network replay is impossible: nonce is consumed once; timestamp expires.
+  • Attacker must EXTRACT the client_secret from your binary to forge
+    a valid HMAC — protect it with PyArmor, Nuitka, or similar tools.
+
+  authlxapp = api(
+      name          = "MyApp",
+      ownerid       = "YOUR-APP-UUID",
+      version       = "1.0",
+      client_secret = "YOUR-CLIENT-SECRET",  # from dashboard
+  )
+
+  MODE 2 — OFF  (no client_secret — developer opts out)
+  ───────────────────────────────────────────────────────
+  • The hash field is sent to the backend but the server ignores it
+    entirely (because there is no HMAC to verify with).
+  • No manual whitelisting required.
+  • No hash protection. Auth relies on password, HWID, and sessions.
+  • Use this when your language/environment cannot protect a secret.
+
+  authlxapp = api(
+      name    = "MyApp",
+      ownerid = "YOUR-APP-UUID",
+      version = "1.0",
+      # client_secret omitted → OFF mode
+  )
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  WINDOWS SETUP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pip install pywin32
+  python -m pywin32_postinstall -install
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PRODUCTION HARDENING (hide client_secret from reverse engineers)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Step 1: Obfuscate source code
+      pip install pyarmor
+      pyarmor gen main.py            # outputs dist/main.py (encrypted)
+
+  Step 2: Compile to executable
+      pip install pyinstaller
+      pyinstaller --onefile dist/main.py
+
+  Step 3: Ship the .exe — client_secret is now inside encrypted bytecode.
+  Step 4: No manual hash whitelisting ever — the HMAC auto-registers it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import os
 import sys
-import json
 import time
 import hmac
 import hashlib
 import logging
 import platform
+import secrets as _secrets
 import subprocess
 import threading
 from urllib.parse import urlparse
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] AuthLX: %(message)s",
@@ -42,12 +104,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AuthLX")
 
-# ---------------------------------------------------------------------------
-# Dependency bootstrap
-# ---------------------------------------------------------------------------
+# ─── Dependency bootstrap ─────────────────────────────────────────────────────
 try:
     if os.name == "nt":
+        import win32api       # type: ignore  # pip install pywin32
         import win32security  # type: ignore
+        import win32con       # type: ignore
     import requests
 except ModuleNotFoundError:
     print("AuthLX: Required modules not found. Installing...")
@@ -57,152 +119,302 @@ except ModuleNotFoundError:
         if os.name == "nt":
             os.system("pip install pywin32")
         os.system("pip install requests")
-    print("AuthLX: Modules installed. Please re-run the application.")
+    print("AuthLX: Done. Please re-run the application.")
     time.sleep(1.5)
     os._exit(1)
 
 
-# ---------------------------------------------------------------------------
-# api  –  main SDK class
-# ---------------------------------------------------------------------------
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   api  —  main SDK class
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class api:
     """
-    AuthLX client SDK.
+    AuthLX client SDK — see module docstring for full usage guide.
 
-    Usage::
+    Parameters
+    ----------
+    name : str
+        Human-readable app name shown in the AuthLX Dashboard.
 
-        from authlx import api, others
+    ownerid : str
+        Application UUID.  Find it in:
+        Dashboard → Select App → App Info → App ID
 
-        app = api(
-            name="MyApp",
-            ownerid="YOUR-APP-UUID",
-            version="1.0",
-            hash_to_check=others.get_checksum(),   # optional: enable hash check
+    version : str
+        Application version string (e.g. "1.0").
+        Must match the version registered in your AuthLX Dashboard.
+        If the backend returns a different version the process exits
+        and prints the update/download link.
+
+    client_secret : str, optional
+        The Application Client Secret from your AuthLX Dashboard.
+        Dashboard → Select App → App Info → Client Secret
+
+        ► Provide this for SECURE MODE (recommended):
+          • Every request is HMAC-signed with this secret.
+          • Hashes are auto-whitelisted — no dashboard work after each build.
+          • Network replay attacks are blocked via timestamp + nonce.
+
+        ► Omit for OFF MODE (developer opt-out):
+          • No hash-based protection. Hash field is sent but ignored by server.
+          • Auth still protected by bcrypt password, HWID lock, and sessions.
+
+    hash_to_check : str, optional
+        Override the auto-computed SHA-256 hash.
+        • Leave None (default) — SDK reads this file/exe and computes its own hash.
+        • Pass "dev-skip" only during local testing to avoid hash-related errors
+          while actively editing code. NEVER ship with a hardcoded string.
+
+    api_url : str, optional
+        Override the AuthLX API base URL.  Leave None to use the production
+        endpoint.  Only change if you are self-hosting the backend.
+
+    Examples
+    --------
+    SECURE MODE (recommended for all production apps)::
+
+        authlxapp = api(
+            name          = "MyApp",
+            ownerid       = "YOUR-APP-UUID",
+            version       = "1.0",
+            client_secret = "YOUR-CLIENT-SECRET",
         )
 
-        if app.login("alice", "s3cr3t"):
-            print("Welcome,", app.user_data.username)
+    OFF MODE (no hash protection, developer opts out)::
+
+        authlxapp = api(
+            name    = "MyApp",
+            ownerid = "YOUR-APP-UUID",
+            version = "1.0",
+        )
+
+    Development / testing (skip hash check locally)::
+
+        authlxapp = api(
+            name          = "MyApp",
+            ownerid       = "YOUR-APP-UUID",
+            version       = "1.0",
+            client_secret = "YOUR-CLIENT-SECRET",
+            hash_to_check = "dev-skip",  # ← only for local dev; remove before release
+        )
     """
 
-    # ------------------------------------------------------------------
-    # Inner data class
-    # ------------------------------------------------------------------
+    # ── Inner user data class ─────────────────────────────────────────────────
     class user_data_class:
-        """Holds all user fields returned after a successful login."""
-
+        """Holds all user fields populated after a successful login."""
         def __init__(self):
-            self.username: str = ""
-            self.hwid: str = ""
-            self.expires: str = ""
-            self.createdate: str = ""
-            self.lastlogin: str = ""
-            self.subscription: str = ""
-            self.subscriptions: list = []
-            self.is_authenticated: bool = False
+            self.username: str           = ""
+            self.hwid: str               = ""
+            self.expires: str            = ""
+            self.createdate: str         = ""
+            self.lastlogin: str          = ""
+            self.subscription: str       = ""
+            self.subscriptions: list     = []
+            self.is_authenticated: bool  = False
             self.auth_runtime_start: float = 0.0
 
-    # ------------------------------------------------------------------
-    # Constructor
-    # ------------------------------------------------------------------
+    # ── Constructor ───────────────────────────────────────────────────────────
     def __init__(
         self,
         name: str,
         ownerid: str,
         version: str,
-        hash_to_check: str = None,
-        api_url: str = None,
+        client_secret: str  = None,
+        hash_to_check: str  = None,
+        api_url: str        = None,
     ):
-        """
-        Initialise the SDK and contact the AuthLX backend.
-
-        :param name:          Human-readable application name.
-        :param ownerid:       Application UUID from the AuthLX dashboard.
-        :param version:       Application version string (e.g. "1.0").
-        :param hash_to_check: SHA-256 hex digest of the running executable.
-                              Leave ``None`` to compute it automatically via
-                              ``others.get_checksum()``, or pass a fixed
-                              string to disable hash checking in development.
-        :param api_url:       Override the AuthLX API base URL.  Defaults to
-                              ``https://api.authlx.com/api/v1/client``.
-        """
-        self.name = name
+        self.name    = name
         self.ownerid = ownerid
         self.version = version
-        self.hash_to_check = (
-            hash_to_check if hash_to_check is not None else others.get_checksum()
+
+        # SECURE MODE secret — developer's responsibility to protect in binary
+        self._client_secret: str = client_secret
+
+        # Hash of the running file — computed once at startup
+        self.hash_to_check: str = (
+            hash_to_check if hash_to_check is not None
+            else others.get_checksum()
         )
-        self.api_url = api_url or "https://authlx.com/api/v1/client"
 
-        # Per-instance HTTP session
+        self.api_url: str = api_url or "https://authlx.com/api/v1/client"
+
+        # Per-instance HTTP session — trust_env=False disables proxy auto-config
         self._session = requests.Session()
-        self._session.trust_env = False   # disables local proxy auto-config (anti-MITM)
+        self._session.trust_env = False   # Anti-MITM: ignore system proxy settings
 
-        # Authentication state
-        self.session_token: str = ""
-        self.initialized: bool = False
-        self.hwid_method: str = "windows_user"
-        self.user_data = self.user_data_class()
+        # Auth state
+        self.session_token: str  = ""
+        self.initialized: bool   = False
+        self.hwid_method: str    = "windows_user"  # overridden by server on init()
+        self.user_data           = self.user_data_class()
 
         # Rate limiting
-        self._login_fails: int = 0
+        self._login_fails: int   = 0
         self._lockout_end: float = 0.0
 
-        # Debug mode
+        # Debug
         self._debug: bool = False
 
-        # Networking & security
-        self._allowed_hosts: list = []
-        self._pinned_public_keys: list = []
-        self._secure_strings_enabled: bool = False
-        self._secure_key: bytes = None
+        # Security options
+        self._allowed_hosts: list       = []
+        self._pinned_public_keys: list  = []
 
         # Ban monitor
         self._ban_monitor_thread: threading.Thread = None
-        self._ban_monitor_active: bool = False
+        self._ban_monitor_active: bool             = False
 
+        # Auto-init on construction
         self.init()
 
-    # ------------------------------------------------------------------
-    # Core lifecycle
-    # ------------------------------------------------------------------
+    # ── Core lifecycle ────────────────────────────────────────────────────────
+
     def init(self):
         """
-        Contact the AuthLX backend to verify the application is active and
-        the client version matches.  Called automatically by ``__init__``.
-        Exits the process if the backend is unreachable or the app is disabled.
+        Contact the AuthLX backend to verify the app is active and version
+        matches.  Called automatically by ``__init__``.
+
+        Also fetches server-side configuration (HWID method).
+        Exits the process if the app is disabled, unreachable, or outdated.
+        Anti-debug runs automatically inside this call.
         """
         others.anti_debug()
 
         response = self._do_request("/init", {"app_id": self.ownerid})
 
         if response and response.get("status") == "success":
-            app_info = response.get("app_info", {})
+            app_info       = response.get("app_info", {})
             server_version = app_info.get("version", self.version)
 
             if server_version != self.version:
-                logger.critical("\n[UPDATE REQUIRED] Your application version is outdated!")
-                logger.critical(
-                    f"Current: {self.version}  |  Required: {server_version}"
-                )
+                logger.critical("\n[UPDATE REQUIRED] Application version is outdated!")
+                logger.critical(f"  Current: {self.version}  |  Required: {server_version}")
                 auto_update = app_info.get("auto_update_link")
-                webloader = app_info.get("webloader_link")
+                webloader   = app_info.get("webloader_link")
                 if auto_update:
-                    logger.critical(f"[DOWNLOAD] Auto-update link: {auto_update}")
+                    logger.critical(f"  Download: {auto_update}")
                 if webloader:
-                    logger.critical(f"[DOWNLOAD] Webloader link:   {webloader}")
-                logger.critical("Please update before continuing.\n")
+                    logger.critical(f"  Webloader: {webloader}")
                 time.sleep(5)
                 os._exit(1)
 
             self.initialized = True
             self.hwid_method = app_info.get("hwid_method", "windows_user")
+
+            mode = "SECURE (HMAC + auto-whitelist)" if self._client_secret else "OFF (no hash protection)"
+            if self._debug:
+                logger.debug(f"Hash mode: {mode}")
         else:
-            logger.error("Failed to initialise application. Check your ownerid and network.")
+            logger.error("Failed to initialise. Check ownerid and network connectivity.")
             os._exit(1)
 
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
+    # ── HMAC helper ───────────────────────────────────────────────────────────
+
+    def _compute_hash_signature(self) -> tuple:
+        """
+        Compute the HMAC-SHA256 signature for the current hash.
+
+        Only called when ``client_secret`` is set (SECURE MODE).
+
+        Returns
+        -------
+        tuple
+            (signature_hex, timestamp_str, nonce_hex)
+
+        Security properties:
+          • signature   — HMAC proves requester knows the client_secret
+          • timestamp   — backend rejects requests older than 5 minutes
+          • nonce       — random 32-char hex string; backend blocks duplicates
+                          within 10 minutes (single-use token)
+        """
+        timestamp = str(int(time.time()))
+        nonce     = _secrets.token_hex(16)   # 32 hex chars = 128 bits of entropy
+        signature = hmac.new(
+            self._client_secret.encode("utf-8"),
+            f"{self.hash_to_check}:{timestamp}:{nonce}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return signature, timestamp, nonce
+
+    def _build_hash_payload(self) -> dict:
+        """
+        Build the hash-related fields to include in every login/register payload.
+
+        SECURE MODE  — returns hash + hash_signature + hash_timestamp + hash_nonce
+        OFF MODE     — returns hash only (backend ignores it)
+        """
+        payload = {"hash": self.hash_to_check}
+
+        if self._client_secret:
+            sig, ts, nonce = self._compute_hash_signature()
+            payload["hash_signature"]  = sig
+            payload["hash_timestamp"]  = ts
+            payload["hash_nonce"]      = nonce
+
+        return payload
+
+    # ── Authentication ────────────────────────────────────────────────────────
+
+    def login(self, user: str, password: str, hwid: str = None) -> bool:
+        """
+        Authenticate a user with username, password, and (optionally) HWID.
+
+        In SECURE MODE (client_secret provided):
+          • HMAC signature + timestamp + nonce are computed and sent automatically.
+          • The backend verifies HMAC → rejects if secret doesn't match.
+          • The nonce is consumed server-side → replay is impossible.
+          • The hash is auto-whitelisted → no manual dashboard work needed.
+
+        In OFF MODE (no client_secret):
+          • Only hash string is sent. Backend ignores it.
+          • Auth protected by password bcrypt + HWID + session token.
+
+        Parameters
+        ----------
+        user : str
+            Username.
+        password : str
+            Plain-text password (hashed server-side with bcrypt).
+        hwid : str, optional
+            Hardware ID.  Auto-detected via ``others.get_hwid()`` if omitted.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
+        """
+        self._checkinit()
+
+        if hwid is None:
+            hwid = others.get_hwid(method=self.hwid_method)
+
+        payload = {
+            "app_id":   self.ownerid,
+            "username": user,
+            "password": password,
+            "hwid":     hwid,
+            "version":  self.version,
+        }
+        payload.update(self._build_hash_payload())  # adds hash (+ signature fields if SECURE)
+
+        if self._debug:
+            mode = "SECURE" if self._client_secret else "OFF"
+            logger.debug(f"login() hash mode: {mode}, hash: {self.hash_to_check[:16]}…")
+
+        response = self._do_request("/login", payload)
+
+        if response and response.get("status") == "success":
+            data = response.get("data", {})
+            self.session_token = data.get("token", "")
+            self._load_user_data(data.get("user", {}))
+            self.mark_authenticated()
+            logger.info(f"Successfully logged in as '{self.user_data.username}'!")
+            return True
+
+        msg = (response.get("message", "Login failed.") if response else "No server response.")
+        logger.error(f"Login Failed: {msg}")
+        self._login_hint(msg)
+        return False
+
     def register(
         self,
         user: str,
@@ -214,121 +426,76 @@ class api:
         """
         Register a new user account by activating a license key.
 
-        :param user:        Desired username.
-        :param email:       User's email address.
-        :param password:    Desired password (plain-text; hashed server-side).
-        :param license_key: A valid, unused license key for this application.
-        :param hwid:        Hardware ID to bind.  Auto-detected if ``None``.
-        :returns:           ``True`` on success, ``False`` on failure.
+        Includes the same HMAC hash payload as ``login()``.
+
+        Parameters
+        ----------
+        user : str
+            Desired username.
+        email : str
+            User's email address.
+        password : str
+            Desired password.
+        license_key : str
+            A valid, unused license key for this application.
+        hwid : str, optional
+            Hardware ID.  Auto-detected if omitted.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
         """
         self._checkinit()
+
         if hwid is None:
             hwid = others.get_hwid(method=self.hwid_method)
 
-        response = self._do_request(
-            "/register",
-            {
-                "app_id": self.ownerid,
-                "username": user,
-                "email": email,
-                "password": password,
-                "license_key": license_key,
-                "hwid": hwid,
-            },
-        )
+        payload = {
+            "app_id":      self.ownerid,
+            "username":    user,
+            "email":       email,
+            "password":    password,
+            "license_key": license_key,
+            "hwid":        hwid,
+        }
+        payload.update(self._build_hash_payload())
+
+        response = self._do_request("/register", payload)
 
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Successfully registered!"))
+            logger.info(response.get("message", "Registration successful!"))
             return True
 
-        msg = response.get("message", "Registration failed.") if response else "No response."
+        msg = (response.get("message", "Registration failed.") if response else "No server response.")
         logger.error(f"Registration Failed: {msg}")
-        if "Application not found" in msg:
-            logger.critical(
-                "\n[SETUP ERROR] The ownerid (App ID) is incorrect.\n"
-                "[RESOLUTION] Copy the exact App ID from your AuthLX Dashboard.\n"
-            )
-        return False
-
-    def login(self, user: str, password: str, hwid: str = None) -> bool:
-        """
-        Authenticate a user with username, password, and (optionally) HWID.
-
-        On success the SDK stores a session token and populates ``user_data``.
-
-        :param user:     Username.
-        :param password: Plain-text password.
-        :param hwid:     Hardware ID.  Auto-detected if ``None``.
-        :returns:        ``True`` on success, ``False`` on failure.
-        """
-        self._checkinit()
-        if hwid is None:
-            hwid = others.get_hwid(method=self.hwid_method)
-
-        response = self._do_request(
-            "/login",
-            {
-                "app_id": self.ownerid,
-                "username": user,
-                "password": password,
-                "hwid": hwid,
-                "hash": self.hash_to_check,
-                "version": self.version,
-            },
-        )
-
-        if response and response.get("status") == "success":
-            data = response.get("data", {})
-            self.session_token = data.get("token", "")
-            self._load_user_data(data.get("user", {}))
-            logger.info("Successfully logged in!")
-            return True
-
-        msg = response.get("message", "Login failed.") if response else "No response."
-        logger.error(f"Login Failed: {msg}")
-
-        if "Application hash invalid" in msg or "Application hash required" in msg:
-            logger.critical(
-                "\n[SETUP ERROR] Hash Check is enabled but this script's hash is not whitelisted."
-            )
-            logger.critical(
-                f"[RESOLUTION] Dashboard → Your App → Security → Add hash: {self.hash_to_check}\n"
-            )
-        elif "Application not found" in msg:
-            logger.critical(
-                "\n[SETUP ERROR] The ownerid (App ID) is incorrect.\n"
-                "[RESOLUTION] Copy the exact App ID from your AuthLX Dashboard.\n"
-            )
-        elif "Hardware ID mismatch" in msg:
-            logger.critical("\n[USER ERROR] The user's hardware ID has changed.")
-            logger.critical(
-                "[RESOLUTION] The user needs an HWID reset from the AuthLX Dashboard.\n"
-            )
-        elif "Application is currently disabled" in msg:
-            logger.critical(
-                "\n[SETUP ERROR] Your application is disabled.\n"
-                "[RESOLUTION] Set your app to Active in the AuthLX Dashboard.\n"
-            )
+        self._login_hint(msg)
         return False
 
     def web_login(self, user: str, password: str) -> bool:
         """
-        Authenticate a user without HWID (suitable for web or admin panels).
+        Authenticate without HWID binding (for web panels or admin tools).
 
-        Includes client-side brute-force protection: after 3 consecutive
-        failures a 5-minute lockout is enforced locally.
+        Includes client-side brute-force lockout: 3 consecutive failures
+        trigger a 5-minute lockout before another attempt is allowed.
 
-        :param user:     Username.
-        :param password: Plain-text password.
-        :returns:        ``True`` on success, ``False`` on failure.
+        Parameters
+        ----------
+        user : str
+            Username.
+        password : str
+            Plain-text password.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
         """
         self._checkinit()
+
         if self.lockout_active():
-            remaining = self.lockout_remaining_ms() // 1000
-            logger.error(
-                f"Account locked out due to multiple failed attempts. "
-                f"Try again in {remaining} seconds."
-            )
+            secs = self.lockout_remaining_ms() // 1000
+            logger.error(f"Locked out due to multiple failed attempts. Try again in {secs}s.")
             return False
 
         response = self._do_request(
@@ -346,7 +513,7 @@ class api:
 
         self.record_login_fail()
         self.bad_input_delay()
-        msg = response.get("message", "Web login failed.") if response else "No response."
+        msg = (response.get("message", "Web login failed.") if response else "No server response.")
         logger.error(f"Web Login Failed: {msg}")
         return False
 
@@ -354,7 +521,10 @@ class api:
         """
         Invalidate the current session on the backend and clear the local token.
 
-        :returns: ``True`` on success, ``False`` if not logged in or on error.
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` if not logged in or on error.
         """
         self._checkinit()
         if not self.session_token:
@@ -367,66 +537,65 @@ class api:
         )
 
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Logged out successfully."))
+            logger.info(response.get("message", "Logged out."))
             self.session_token = ""
+            self.user_data     = self.user_data_class()
             return True
 
-        msg = response.get("message", "Logout failed.") if response else "No response."
+        msg = (response.get("message", "Logout failed.") if response else "No server response.")
         logger.error(msg)
         return False
 
     def register_web(
-        self,
-        user: str,
-        email: str,
-        password: str,
-        license_key: str,
+        self, user: str, email: str, password: str, license_key: str
     ) -> bool:
-        """
-        Register a new user without binding a HWID (web-flow registration).
-
-        :param user:        Desired username.
-        :param email:       User's email address.
-        :param password:    Desired password.
-        :param license_key: Valid, unused license key.
-        :returns:           ``True`` on success, ``False`` on failure.
-        """
+        """Register without binding a HWID (web-flow registration)."""
         return self.register(user, email, password, license_key, hwid="")
 
-    # ------------------------------------------------------------------
-    # License operations
-    # ------------------------------------------------------------------
+    # ── License operations ────────────────────────────────────────────────────
+
     def upgrade(self, user: str, license_key: str) -> bool:
         """
         Apply an unused license key to an existing account to extend its
-        subscription or change its subscription level.
+        subscription or change its tier.
 
-        :param user:        Username of the account to upgrade.
-        :param license_key: Valid, unused license key.
-        :returns:           ``True`` on success, ``False`` on failure.
+        Parameters
+        ----------
+        user : str
+            Username of the account to upgrade.
+        license_key : str
+            Valid, unused license key.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
         """
         self._checkinit()
         response = self._do_request(
             "/upgrade",
             {"app_id": self.ownerid, "username": user, "license_key": license_key},
         )
-
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Account upgraded successfully!"))
+            logger.info(response.get("message", "Account upgraded!"))
             return True
-
-        msg = response.get("message", "Upgrade failed.") if response else "No response."
+        msg = (response.get("message", "Upgrade failed.") if response else "No server response.")
         logger.error(f"Upgrade Failed: {msg}")
         return False
 
-    # ------------------------------------------------------------------
-    # Session & token verification
-    # ------------------------------------------------------------------
+    # ── Session & token verification ──────────────────────────────────────────
+
     def check(self) -> bool:
         """
         Verify that the current session token is still valid on the backend.
 
-        :returns: ``True`` if the session is active, ``False`` otherwise.
+        Call this at intervals (or use ``start_ban_monitor()``) to detect
+        admin bans or session revocations at runtime.
+
+        Returns
+        -------
+        bool
+            ``True`` if session is active, ``False`` otherwise.
         """
         self._checkinit()
         if not self.session_token:
@@ -440,36 +609,47 @@ class api:
 
     def verify_token(self, standalone_token: str) -> bool:
         """
-        Verify a standalone API token (issued separately from a login session).
+        Verify a standalone API token issued from the AuthLX Dashboard.
 
-        :param standalone_token: The token string to validate.
-        :returns:                ``True`` if valid, ``False`` otherwise.
+        Parameters
+        ----------
+        standalone_token : str
+            The token string to validate.
+
+        Returns
+        -------
+        bool
+            ``True`` if valid and not banned, ``False`` otherwise.
         """
         self._checkinit()
         response = self._do_request(
             "/verify-token",
             {"app_id": self.ownerid, "token": standalone_token},
         )
-
         if response and response.get("status") == "success":
             logger.info("Token is valid!")
             return True
-
-        msg = response.get("message", "Invalid or banned token.") if response else "No response."
+        msg = (response.get("message", "Invalid or banned token.") if response else "No response.")
         logger.error(msg)
         return False
 
-    # ------------------------------------------------------------------
-    # Account management
-    # ------------------------------------------------------------------
+    # ── Account management ────────────────────────────────────────────────────
+
     def changeUsername(self, new_username: str) -> bool:
         """
         Change the username of the currently logged-in user.
 
-        Requires an active session (call ``login()`` first).
+        Requires an active session (``login()`` must have succeeded).
 
-        :param new_username: The desired new username.
-        :returns:            ``True`` on success, ``False`` on failure.
+        Parameters
+        ----------
+        new_username : str
+            The desired new username.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
         """
         self._checkinit()
         if not self.session_token:
@@ -479,32 +659,39 @@ class api:
         response = self._do_request(
             "/change-username",
             {
-                "app_id": self.ownerid,
+                "app_id":           self.ownerid,
                 "current_username": self.user_data.username,
-                "new_username": new_username,
+                "new_username":     new_username,
             },
         )
-
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Username changed successfully!"))
+            logger.info(response.get("message", "Username changed!"))
             self.user_data.username = new_username
             return True
-
-        msg = response.get("message", "Username change failed.") if response else "No response."
-        logger.error(f"Change Username Failed: {msg}")
+        msg = (response.get("message", "Failed.") if response else "No response.")
+        logger.error(f"changeUsername Failed: {msg}")
         return False
 
     def forgot(self, user: str, new_password: str, hwid: str = None) -> bool:
         """
         Reset a user's password by verifying their bound Hardware ID.
 
-        The account must have a HWID bound (i.e. the user must have logged
-        in at least once with HWID locking enabled).
+        The account must have a HWID bound (logged in at least once with
+        HWID locking enabled on the app).
 
-        :param user:         Username of the account to reset.
-        :param new_password: The new plain-text password.
-        :param hwid:         The user's current Hardware ID.  Auto-detected if ``None``.
-        :returns:            ``True`` on success, ``False`` on failure.
+        Parameters
+        ----------
+        user : str
+            Username of the account to reset.
+        new_password : str
+            The new plain-text password.
+        hwid : str, optional
+            The user's current Hardware ID.  Auto-detected if omitted.
+
+        Returns
+        -------
+        bool
+            ``True`` on success, ``False`` on failure.
         """
         self._checkinit()
         if hwid is None:
@@ -513,82 +700,71 @@ class api:
         response = self._do_request(
             "/forgot",
             {
-                "app_id": self.ownerid,
-                "username": user,
-                "hwid": hwid,
+                "app_id":       self.ownerid,
+                "username":     user,
+                "hwid":         hwid,
                 "new_password": new_password,
             },
         )
-
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Password reset successfully!"))
+            logger.info(response.get("message", "Password reset!"))
             return True
-
-        msg = response.get("message", "Password reset failed.") if response else "No response."
-        logger.error(f"Password Reset Failed: {msg}")
+        msg = (response.get("message", "Failed.") if response else "No response.")
+        logger.error(f"forgot Failed: {msg}")
         return False
 
-    # ------------------------------------------------------------------
-    # Subscription & expiry helpers
-    # ------------------------------------------------------------------
+    # ── Subscription & expiry helpers ─────────────────────────────────────────
+
     def has_active_subscription(self) -> bool:
-        """
-        Return ``True`` if the logged-in user's subscription has not expired.
-        """
+        """Return ``True`` if the logged-in user's subscription has not expired."""
         return self.expiry_remaining() > 0
 
     def expiry_remaining(self) -> float:
         """
-        Return the number of seconds remaining until the subscription expires.
-        Returns ``0`` if expired, or if no expiry date is available.
+        Return the number of seconds until the subscription expires.
+        Returns ``0`` if expired or no expiry data is available.
         """
         if not self.user_data.expires:
             return 0
         from datetime import datetime
-
         try:
-            expire_str = self.user_data.expires.replace("Z", "+00:00")
-            expire_dt = datetime.fromisoformat(expire_str)
-            now_dt = datetime.now(expire_dt.tzinfo)
-            return max(0.0, (expire_dt - now_dt).total_seconds())
+            s = self.user_data.expires.replace("Z", "+00:00")
+            exp = datetime.fromisoformat(s)
+            now = datetime.now(exp.tzinfo)
+            return max(0.0, (exp - now).total_seconds())
         except Exception as e:
             if self._debug:
-                logger.debug(f"Expiry parse error: {e}")
+                logger.debug(f"expiry_remaining parse error: {e}")
             return 0
 
-    # ------------------------------------------------------------------
-    # Auth runtime state
-    # ------------------------------------------------------------------
-    def mark_authenticated(self):
-        """Mark the user as authenticated and record the runtime start time."""
-        self.user_data.is_authenticated = True
-        self.refresh_auth_runtime()
+    # ── Auth runtime state ────────────────────────────────────────────────────
 
-    def refresh_auth_runtime(self):
-        """Update the authentication runtime start timestamp to *now*."""
+    def mark_authenticated(self):
+        """Mark user as authenticated and record the runtime start time."""
+        self.user_data.is_authenticated  = True
         self.user_data.auth_runtime_start = time.time()
 
-    def reset_auth_runtime(self):
-        """Alias for ``refresh_auth_runtime`` — resets the runtime clock."""
-        self.refresh_auth_runtime()
+    def refresh_auth_runtime(self):
+        """Reset the authentication runtime clock to now."""
+        self.user_data.auth_runtime_start = time.time()
 
-    # ------------------------------------------------------------------
-    # Networking & security
-    # ------------------------------------------------------------------
+    reset_auth_runtime = refresh_auth_runtime  # alias
+
+    # ── Networking & security ─────────────────────────────────────────────────
+
     def set_allowed_hosts(self, hosts: list):
         """
         Restrict all SDK HTTP requests to the given list of hostnames.
-        Any request to a hostname not in this list causes an immediate exit.
+        Any request to a hostname not in this list causes immediate exit.
 
-        :param hosts: List of allowed hostnames (e.g. ``["api.authlx.com"]``).
+        Example::
+
+            authlxapp.set_allowed_hosts(["authlx.com"])
         """
         self._allowed_hosts = list(hosts)
 
     def add_allowed_host(self, host: str):
-        """
-        Add a single hostname to the allowed-hosts list.
-        Duplicate entries are silently ignored.
-        """
+        """Add a single hostname to the allowed-hosts list."""
         if host not in self._allowed_hosts:
             self._allowed_hosts.append(host)
 
@@ -597,19 +773,11 @@ class api:
         self._allowed_hosts = []
 
     def set_pinned_public_keys(self, keys: list):
-        """
-        Set the list of accepted TLS public-key pins (``sha256//BASE64==`` format).
-        Connections to hosts whose certificate does not match are rejected.
-
-        :param keys: List of pin strings.
-        """
+        """Set TLS public-key pins (``sha256//BASE64==`` format)."""
         self._pinned_public_keys = list(keys)
 
     def add_pinned_public_key(self, key: str):
-        """
-        Add a single TLS public-key pin.
-        Duplicate entries are silently ignored.
-        """
+        """Add a single TLS public-key pin."""
         if key not in self._pinned_public_keys:
             self._pinned_public_keys.append(key)
 
@@ -617,100 +785,60 @@ class api:
         """Remove all TLS public-key pins."""
         self._pinned_public_keys = []
 
-    def enable_secure_strings(self):
-        """
-        Enable payload cryptography mode.
-        When active, the SDK will attempt to unseal encrypted server responses.
-        Derive a key first with ``derive_secure_key()``.
-        """
-        self._secure_strings_enabled = True
-
-    def derive_secure_key(self, material: str):
-        """
-        Derive a 32-byte symmetric key from ``material`` (e.g.
-        ``session_token + ":" + hwid``).  The result is stored in
-        ``_secure_key`` and used by ``compute_auth_seal`` and
-        ``xor_crypt_field``.
-
-        :param material: Arbitrary string used as key-derivation input.
-        """
-        self._secure_key = hashlib.sha256(material.encode()).digest()
-
-    def xor_crypt_field(self, data: str, key: str) -> str:
-        """
-        XOR-encrypt or decrypt a string field with a repeating key.
-        Applying this function twice with the same key is its own inverse::
-
-            original == xor_crypt_field(xor_crypt_field(original, key), key)
-
-        :param data: Input string.
-        :param key:  Key string (repeated to match ``data`` length).
-        :returns:    XOR-processed output string.
-        """
-        key_cycle = key * (len(data) // len(key) + 1)
-        return "".join(chr(ord(c) ^ ord(k)) for c, k in zip(data, key_cycle))
-
-    def compute_auth_seal(self, payload: str):
-        """
-        Compute an HMAC-SHA256 hex digest of ``payload`` using the derived
-        secure key.  Returns ``None`` if no key has been derived yet.
-
-        :param payload: The string to seal.
-        :returns:       64-character hex string, or ``None``.
-        """
-        if not self._secure_key:
-            return None
-        return hmac.new(self._secure_key, payload.encode(), hashlib.sha256).hexdigest()
-
     def req(self, url: str, method: str = "GET", **kwargs):
         """
-        Hardened HTTP request wrapper that enforces host-locking and key-pinning
-        on arbitrary URLs (not just AuthLX endpoints).
+        Hardened HTTP wrapper that enforces host-locking on arbitrary URLs.
 
-        :param url:    Target URL.
-        :param method: HTTP method (``"GET"`` or ``"POST"``).
-        :param kwargs: Additional keyword arguments forwarded to ``requests``.
-        :returns:      A ``requests.Response`` object, or ``None`` on error.
+        Parameters
+        ----------
+        url : str
+            Target URL.
+        method : str
+            "GET" or "POST".
+        **kwargs
+            Additional arguments forwarded to ``requests``.
+
+        Returns
+        -------
+        requests.Response or None
         """
         if self._allowed_hosts:
             domain = urlparse(url).hostname
             if domain not in self._allowed_hosts:
-                logger.critical(
-                    f"Security violation: Connection blocked to unauthorized host: {domain}"
-                )
+                logger.critical(f"Security violation: blocked connection to {domain}")
                 time.sleep(self.close_delay() / 1000)
                 os._exit(1)
-
         try:
-            if method.upper() == "GET":
-                res = self._session.get(url, **kwargs)
-            else:
-                res = self._session.post(url, **kwargs)
-
-            if self._pinned_public_keys:
-                self._verify_pinned_key(url)
-
-            return res
+            fn = self._session.get if method.upper() == "GET" else self._session.post
+            return fn(url, **kwargs)
         except Exception as e:
             logger.error(f"req() failed: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    # Ban monitor
-    # ------------------------------------------------------------------
+    # ── Ban monitor ───────────────────────────────────────────────────────────
+
     def start_ban_monitor(self, interval_seconds: int = 60):
         """
-        Start a background daemon thread that periodically checks whether the
-        current session is still valid.  If the session is revoked (e.g. due
-        to an admin ban), the process is terminated immediately.
+        Start a background daemon thread that polls session validity.
+
+        If the session is revoked (e.g. the user is banned by an admin
+        while the app is running), the process is terminated immediately.
 
         Calling this when the monitor is already running is a no-op.
 
-        :param interval_seconds: Polling interval in seconds (default: 60).
+        Parameters
+        ----------
+        interval_seconds : int
+            Polling interval in seconds (default: 60).
+
+        Example::
+
+            if authlxapp.login("alice", "password"):
+                authlxapp.start_ban_monitor(interval_seconds=120)
+                # Your app logic here...
         """
         if self._ban_monitor_active:
             return
-
         self._ban_monitor_active = True
         self._ban_monitor_thread = threading.Thread(
             target=self._ban_monitor_loop,
@@ -736,9 +864,8 @@ class api:
             and self._ban_monitor_thread.is_alive()
         )
 
-    # ------------------------------------------------------------------
-    # Rate limiting & lockouts
-    # ------------------------------------------------------------------
+    # ── Rate limiting & lockouts ──────────────────────────────────────────────
+
     def record_login_fail(self):
         """
         Increment the consecutive login-failure counter.
@@ -746,7 +873,7 @@ class api:
         """
         self._login_fails += 1
         if self._login_fails >= 3:
-            self._lockout_end = time.time() + 300  # 5 minutes
+            self._lockout_end = time.time() + 300
 
     def lockout_active(self) -> bool:
         """Return ``True`` if a client-side brute-force lockout is in effect."""
@@ -767,60 +894,42 @@ class api:
         self._login_fails = 0
         self._lockout_end = 0.0
 
-    # ------------------------------------------------------------------
-    # Delay helpers
-    # ------------------------------------------------------------------
+    # ── Delay helpers ─────────────────────────────────────────────────────────
+
     def init_fail_delay(self) -> int:
-        """
-        Delay used when the application fails to initialise.
-        Returns the delay in milliseconds (3 000 ms).
-        """
+        """3-second delay used when initialisation fails."""
         time.sleep(3)
         return 3000
 
     def bad_input_delay(self) -> int:
-        """
-        Delay injected after a failed login attempt to slow brute-force tools.
-        Returns the delay in milliseconds (2 000 ms).
-        """
+        """2-second delay injected after a failed login to deter brute force."""
         time.sleep(2)
         return 2000
 
     def close_delay(self) -> int:
-        """
-        Delay used before a forced process exit (e.g. on security violation).
-        Returns the delay in milliseconds (3 000 ms) without sleeping.
-        """
+        """3-second delay used before a forced process exit."""
         return 3000
 
-    # ------------------------------------------------------------------
-    # Debug helpers
-    # ------------------------------------------------------------------
-    def setDebug(self, enable: bool):
-        """
-        Enable or disable verbose debug logging.
+    # ── Debug helpers ─────────────────────────────────────────────────────────
 
-        :param enable: ``True`` to enable, ``False`` to disable.
-        """
+    def setDebug(self, enable: bool):
+        """Enable or disable verbose debug logging."""
         self._debug = enable
 
     def debugInfo(self) -> dict:
-        """
-        Return a snapshot of internal SDK state for debugging purposes.
-
-        :returns: Dictionary with keys ``debug_enabled``, ``lockout_active``,
-                  ``login_fails``, and ``session``.
-        """
+        """Return a snapshot of SDK state for debugging."""
         return {
-            "debug_enabled": self._debug,
+            "debug_enabled":  self._debug,
+            "hash_mode":      "SECURE" if self._client_secret else "OFF",
             "lockout_active": self.lockout_active(),
-            "login_fails": self._login_fails,
-            "session": self.session_token,
+            "login_fails":    self._login_fails,
+            "session":        self.session_token[:12] + "…" if self.session_token else "",
+            "hash":           self.hash_to_check,
+            "hwid_method":    self.hwid_method,
         }
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
+    # ── Private helpers ───────────────────────────────────────────────────────
+
     def _checkinit(self):
         """Abort if ``init()`` has not completed successfully."""
         if not self.initialized:
@@ -831,30 +940,28 @@ class api:
     def _do_request(self, endpoint: str, post_data: dict):
         """
         Internal POST helper.  Enforces host-locking, sets SDK headers,
-        and handles connection/timeout errors with a graceful exit.
+        handles connection/timeout errors with a graceful exit.
         """
         try:
             target_url = f"{self.api_url}{endpoint}"
 
-            # Host Locking
             if self._allowed_hosts:
                 domain = urlparse(target_url).hostname
                 if domain not in self._allowed_hosts:
-                    logger.critical(
-                        f"Security violation: Connection blocked to unauthorized host: {domain}"
-                    )
+                    logger.critical(f"Security violation: blocked to {domain}")
                     time.sleep(self.close_delay() / 1000)
                     os._exit(1)
 
             headers = {
-                "User-Agent": f"AuthLX-ClientSDK/1.0 ({self.name} v{self.version})",
+                "User-Agent":   f"AuthLX-SDK/1.0 ({self.name} v{self.version})",
                 "Content-Type": "application/json",
             }
 
             if self._debug:
-                logger.debug(f"→ {endpoint}  {post_data}")
+                safe = {k: v for k, v in post_data.items() if k != "password"}
+                logger.debug(f"→ POST {endpoint}  {safe}")
 
-            response = self._session.post(
+            resp = self._session.post(
                 target_url,
                 json=post_data,
                 headers=headers,
@@ -862,52 +969,69 @@ class api:
                 verify=True,
             )
 
-            if self._pinned_public_keys:
-                self._verify_pinned_key(target_url)
-
             if self._debug:
-                logger.debug(f"← {response.status_code}  {response.text}")
+                logger.debug(f"← {resp.status_code}  {resp.text[:200]}")
 
             try:
-                return response.json()
+                return resp.json()
             except ValueError:
-                logger.error(f"Invalid JSON response from server (HTTP {response.status_code}).")
+                logger.error(f"Invalid JSON from server (HTTP {resp.status_code}).")
                 time.sleep(self.close_delay() / 1000)
                 os._exit(1)
 
         except requests.exceptions.Timeout:
-            logger.error("Request timed out. The server may be down.")
+            logger.error("Request timed out. Server may be down.")
             time.sleep(self.close_delay() / 1000)
             os._exit(1)
         except requests.exceptions.ConnectionError:
-            logger.error("Connection error. The server is unreachable.")
+            logger.error("Connection error. Server is unreachable.")
             time.sleep(self.close_delay() / 1000)
             os._exit(1)
 
     def _load_user_data(self, data: dict):
         """Populate ``user_data`` from a server response dict."""
-        self.user_data.username = data.get("username", "")
-        self.user_data.hwid = data.get("hwid", "N/A")
+        self.user_data.username   = data.get("username", "")
+        self.user_data.hwid       = data.get("hwid", "N/A")
         self.user_data.createdate = data.get("created_at", "")
-        self.user_data.lastlogin = data.get("last_login_at", "")
-
-        subscriptions = data.get("subscriptions", [])
-        self.user_data.subscriptions = subscriptions
-        if subscriptions:
-            self.user_data.expires = subscriptions[0].get("expiry", "")
-            self.user_data.subscription = subscriptions[0].get("subscription", "")
+        self.user_data.lastlogin  = data.get("last_login_at", "")
+        subs = data.get("subscriptions", [])
+        self.user_data.subscriptions = subs
+        if subs:
+            self.user_data.expires      = subs[0].get("expiry", "")
+            self.user_data.subscription = subs[0].get("subscription", "")
         else:
-            self.user_data.expires = ""
+            self.user_data.expires      = ""
             self.user_data.subscription = ""
 
-    def _verify_pinned_key(self, url: str):
-        """
-        Hook point for TLS public-key pinning.  Override or extend this
-        method to compare the server's certificate public key against
-        ``self._pinned_public_keys`` using the ``ssl`` standard library.
-        """
-        if self._debug:
-            logger.debug(f"[PIN] Key pinning check for {url} (keys: {self._pinned_public_keys})")
+    def _login_hint(self, msg: str):
+        """Print developer-friendly hints based on the error message."""
+        if "signature" in msg.lower() or "hmac" in msg.lower():
+            logger.critical(
+                "\n[ANTI-TAMPER] HMAC verification failed. Possible causes:\n"
+                "  1. client_secret is wrong — copy it exactly from the dashboard.\n"
+                "  2. System clock is more than 5 minutes off — sync your clock.\n"
+            )
+        elif "Application not found" in msg:
+            logger.critical(
+                "\n[SETUP ERROR] ownerid (App ID) is wrong.\n"
+                "  Resolution: copy the exact App ID from AuthLX Dashboard → App Info.\n"
+            )
+        elif "Hardware ID mismatch" in msg:
+            logger.critical(
+                "\n[USER] HWID changed. Admin must reset HWID in the dashboard.\n"
+            )
+        elif "Subscription has expired" in msg:
+            logger.critical("\n[USER] Subscription expired. Purchase a new license key.\n")
+        elif "Application is currently disabled" in msg:
+            logger.critical(
+                "\n[SETUP ERROR] App is disabled in the dashboard.\n"
+                "  Resolution: Dashboard → Select App → Enable.\n"
+            )
+        elif "Replay" in msg or "nonce" in msg.lower():
+            logger.critical(
+                "\n[SECURITY] Replay attack blocked. Each request must use a fresh nonce.\n"
+                "  This error means someone is trying to re-use a captured packet.\n"
+            )
 
     def _ban_monitor_loop(self, interval: int):
         """Background thread body for the ban monitor."""
@@ -916,32 +1040,45 @@ class api:
             if not self.session_token:
                 continue
             if self._debug:
-                logger.debug("Ban monitor: checking session...")
+                logger.debug("Ban monitor: checking session…")
             if not self.check():
-                self._ban_monitor_detected()
+                logger.critical("\n[SECURITY] Session revoked or account banned at runtime.")
+                time.sleep(1)
+                os._exit(1)
 
-    def _ban_monitor_detected(self):
-        """Called by the ban monitor when a session is revoked at runtime."""
-        logger.critical("\n[SECURITY] Session revoked or account banned during runtime.")
-        logger.critical("Process terminating to protect application memory.")
-        time.sleep(1)
-        os._exit(1)
+    def _verify_pinned_key(self, url: str):
+        """Hook point for TLS public-key pinning. Extend as needed."""
+        if self._debug:
+            logger.debug(f"[PIN] Key pinning check for {url}")
 
 
-# ---------------------------------------------------------------------------
-# others  –  static utility class
-# ---------------------------------------------------------------------------
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   others  —  static utility class
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class others:
-    """Static helpers for hardware fingerprinting, hash generation, and anti-debug."""
+    """
+    Static helpers for hardware fingerprinting, hash generation, and anti-debug.
+
+    All methods are static — call them as: ``others.get_hwid()``
+    """
 
     @staticmethod
     def get_checksum() -> str:
         """
         Compute the SHA-256 checksum of the currently running script or
-        executable.  Pass this to the ``hash_to_check`` parameter of ``api``
-        to enable server-side application integrity verification.
+        compiled executable.
 
-        :returns: Lowercase hex SHA-256 digest, or ``"UNKNOWN_HASH"`` on error.
+        Used by the SDK as the Anti-Tamper hash. In SECURE MODE this hash
+        is HMAC-signed with the client_secret and auto-whitelisted by the
+        backend on every successful login — no manual dashboard work needed.
+
+        In development the hash is the SHA-256 of the ``.py`` source file.
+        In production (after PyInstaller compile) it is the SHA-256 of the ``.exe``.
+
+        Returns
+        -------
+        str
+            Lowercase hex SHA-256 digest, or ``"UNKNOWN_HASH"`` on error.
         """
         try:
             with open(sys.argv[0], "rb") as f:
@@ -952,9 +1089,12 @@ class others:
     @staticmethod
     def anti_debug():
         """
-        Terminate the process immediately if a Python debugger is attached
-        (``sys.gettrace()`` is not ``None``).  Called automatically during
-        ``api.init()``.
+        Terminate the process immediately if a Python debugger is attached.
+
+        Checks ``sys.gettrace()`` — any non-``None`` value means a tracer
+        (debugger, profiler) is installed.  Called automatically in ``api.init()``.
+
+        For stronger protection combine with PyArmor and a compiled binary.
         """
         if sys.gettrace() is not None:
             logger.critical("Security violation: Debugger detected. Exiting.")
@@ -963,49 +1103,98 @@ class others:
     @staticmethod
     def get_hwid(method: str = "windows_user") -> str:
         """
-        Return a stable Hardware ID for the current machine:
+        Return a stable Hardware ID for the current machine.
 
-        - **Linux**:   ``/etc/machine-id``
-        - **Windows**: MachineGuid or wmic UUID, or User SID depending on method.
-        - **macOS**:   IOPlatformSerialNumber via ``ioreg``
+        Platform behaviour
+        ------------------
+        **Windows**
+          - ``"windows_user"`` (default): Current user's Security Identifier (SID).
+            Stable per Windows user account.  Requires pywin32.
+          - Any other value: MachineGuid from Windows Registry (stable per install),
+            falls back to ``wmic csproduct get uuid``.
 
-        :returns: Hardware ID string, or a platform-specific fallback on error.
+        **Linux**
+          Reads ``/etc/machine-id``.
+
+        **macOS**
+          Reads ``IOPlatformSerialNumber`` via ioreg.
+
+        Parameters
+        ----------
+        method : str
+            HWID strategy string.  Set by the AuthLX server during ``init()``
+            based on what the developer chose in the dashboard.
+
+        Returns
+        -------
+        str
+            Hardware ID string.
         """
         system = platform.system()
 
+        # ── Linux ──────────────────────────────────────────────────────────────
         if system == "Linux":
             try:
                 with open("/etc/machine-id") as f:
-                    return f.read().strip()
+                    mid = f.read().strip()
+                    if mid:
+                        return mid
             except Exception:
-                return "Unknown-Linux-HWID"
+                pass
+            return "Unknown-Linux-HWID"
 
+        # ── Windows ────────────────────────────────────────────────────────────
         if system == "Windows":
             if method == "windows_user":
+                # Use current user's SID — stable per Windows account
                 try:
-                    import win32security  # type: ignore
-                    user, domain, _ = win32security.LookupAccountName("", win32security.GetUserNameEx(2))
-                    return win32security.ConvertSidToStringSid(user)
+                    proc    = win32api.GetCurrentProcess()
+                    token   = win32security.OpenProcessToken(proc, win32con.TOKEN_QUERY)
+                    sid, _  = win32security.GetTokenInformation(token, win32security.TokenUser)
+                    return win32security.ConvertSidToStringSid(sid)
                 except Exception:
-                    try:
-                        hwid = subprocess.check_output("whoami /user").decode().split("\n")[-2].split()[-1]
-                        return hwid
-                    except Exception:
-                        return "Unknown-Windows-SID"
+                    pass
+                # Fallback: parse whoami /user output (no pywin32 needed)
+                try:
+                    out   = subprocess.check_output(
+                        ["whoami", "/user", "/fo", "csv", "/nh"],
+                        stderr=subprocess.DEVNULL,
+                    ).decode(errors="replace").strip()
+                    parts = out.replace('"', "").split(",")
+                    if len(parts) >= 2:
+                        sid = parts[-1].strip()
+                        if sid.startswith("S-"):
+                            return sid
+                except Exception:
+                    pass
+                return "Unknown-Windows-User-HWID"
+
             else:
+                # Use MachineGuid from Windows Registry — stable per installation
                 try:
                     import winreg
-                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
-                        hwid, _ = winreg.QueryValueEx(key, "MachineGuid")
-                    return hwid
+                    with winreg.OpenKey(
+                        winreg.HKEY_LOCAL_MACHINE,
+                        r"SOFTWARE\Microsoft\Cryptography",
+                    ) as k:
+                        guid, _ = winreg.QueryValueEx(k, "MachineGuid")
+                        return guid
                 except Exception:
-                    try:
-                        import subprocess
-                        hwid = subprocess.check_output("wmic csproduct get uuid").decode().split('\n')[1].strip()
-                        return hwid
-                    except Exception:
-                        return "Unknown-Windows-HWID"
+                    pass
+                # Fallback: wmic
+                try:
+                    out   = subprocess.check_output(
+                        ["wmic", "csproduct", "get", "uuid"],
+                        stderr=subprocess.DEVNULL,
+                    ).decode(errors="replace")
+                    lines = [l.strip() for l in out.splitlines() if l.strip()]
+                    if len(lines) >= 2:
+                        return lines[1]
+                except Exception:
+                    pass
+                return "Unknown-Windows-Machine-HWID"
 
+        # ── macOS ──────────────────────────────────────────────────────────────
         if system == "Darwin":
             try:
                 raw = subprocess.Popen(
@@ -1013,9 +1202,9 @@ class others:
                     stdout=subprocess.PIPE,
                     shell=True,
                 ).communicate()[0]
-                serial = raw.decode().split("=", 1)[1].replace(" ", "")
-                return serial[1:-2]
+                return raw.decode(errors="replace").split("=", 1)[1].replace(" ", "").strip().strip('"')
             except Exception:
-                return "Unknown-Mac-HWID"
+                pass
+            return "Unknown-Mac-HWID"
 
         return "Unknown-HWID"
