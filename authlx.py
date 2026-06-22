@@ -248,6 +248,10 @@ class api:
         self.hwid_method: str    = "windows_user"  # overridden by server on init()
         self.user_data           = self.user_data_class()
 
+        # Ban info extraction
+        self.ban_reason: str     = None
+        self.ban_revoke_date: str = None
+
         # Rate limiting
         self._login_fails: int   = 0
         self._lockout_end: float = 0.0
@@ -411,6 +415,7 @@ class api:
             return True
 
         msg = (response.get("message", "Login failed.") if response else "No server response.")
+        self._parse_ban_info(msg)
         logger.error(f"Login Failed: {msg}")
         self._login_hint(msg)
         return False
@@ -468,6 +473,7 @@ class api:
             return True
 
         msg = (response.get("message", "Registration failed.") if response else "No server response.")
+        self._parse_ban_info(msg)
         logger.error(f"Registration Failed: {msg}")
         self._login_hint(msg)
         return False
@@ -514,6 +520,7 @@ class api:
         self.record_login_fail()
         self.bad_input_delay()
         msg = (response.get("message", "Web login failed.") if response else "No server response.")
+        self._parse_ban_info(msg)
         logger.error(f"Web Login Failed: {msg}")
         return False
 
@@ -577,9 +584,11 @@ class api:
             {"app_id": self.ownerid, "username": user, "license_key": license_key},
         )
         if response and response.get("status") == "success":
-            logger.info(response.get("message", "Account upgraded!"))
+            logger.info(response.get("message", "License successfully applied!"))
             return True
-        msg = (response.get("message", "Upgrade failed.") if response else "No server response.")
+
+        msg = (response.get("message", "Upgrade failed.") if response else "No response.")
+        self._parse_ban_info(msg)
         logger.error(f"Upgrade Failed: {msg}")
         return False
 
@@ -630,6 +639,7 @@ class api:
             logger.info("Token is valid!")
             return True
         msg = (response.get("message", "Invalid or banned token.") if response else "No response.")
+        self._parse_ban_info(msg)
         logger.error(msg)
         return False
 
@@ -1002,6 +1012,22 @@ class api:
         else:
             self.user_data.expires      = ""
             self.user_data.subscription = ""
+
+    def _parse_ban_info(self, msg: str):
+        """Parse ban reason and expiry from backend error messages."""
+        self.ban_reason = None
+        self.ban_revoke_date = None
+        if not msg or ("Account is Banned" not in msg and "License is Banned" not in msg):
+            return
+            
+        import re
+        reason_match = re.search(r"Reason:\s*(.+?)(?=\s*\|\s*Expires:|$)", msg)
+        expires_match = re.search(r"Expires:\s*(.+?)(?=$)", msg)
+        
+        if reason_match:
+            self.ban_reason = reason_match.group(1).strip()
+        if expires_match:
+            self.ban_revoke_date = expires_match.group(1).strip()
 
     def _login_hint(self, msg: str):
         """Print developer-friendly hints based on the error message."""
