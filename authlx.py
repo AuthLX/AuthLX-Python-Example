@@ -288,6 +288,14 @@ class api:
         if response and response.get("status") == "success":
             app_info       = response.get("app_info", {})
             server_version = app_info.get("version", self.version)
+            server_name    = app_info.get("name", self.name)
+
+            if server_name != self.name:
+                logger.critical(f"\n[SECURITY] Application name mismatch!")
+                logger.critical(f"  Expected: {self.name}  |  Server reports: {server_name}")
+                logger.critical("  Exiting to prevent unauthorized execution.")
+                time.sleep(5)
+                os._exit(1)
 
             if server_version != self.version:
                 logger.critical("\n[UPDATE REQUIRED] Application version is outdated!")

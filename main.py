@@ -43,13 +43,13 @@ from authlx import api, others
 # ═══════════════════════════════════════════════════════════════════
 #   CONFIGURATION — fill in from AuthLX Dashboard → App Info
 # ═══════════════════════════════════════════════════════════════════
-APP_NAME    = "MyApp"
-APP_ID      = "YOUR-APP-UUID-HERE"         # ← App UUID from Dashboard
+APP_NAME    = "test"
+APP_ID      = "9ca9bd24-184d-43d6-b34b-cd8cd0c3d1e2"         # ← App UUID from Dashboard
 APP_VERSION = "1.0"
 
 # ► SECURE MODE:  paste your Client Secret here
 # ► OFF MODE:     leave as None
-APP_CLIENT_SECRET = "YOUR-CLIENT-SECRET-HERE"   # ← Client Secret from Dashboard
+APP_CLIENT_SECRET = "067de7682f8fb3d12b4c84019dbbb70ab159b606360c4c88e3e704c1cdd60f71"   # ← Client Secret from Dashboard
 
 # ► Development override: set to "dev-skip" only while actively editing code.
 #   Remove (set to None) before compiling your final .exe for users.
@@ -348,6 +348,26 @@ def example_hwid(authlxapp: api):
     print(f"  machine (registry)  : {others.get_hwid('machine')}")
 
 
+def example_account_details(authlxapp: api):
+    """
+    Example: Display current user's account details.
+    """
+    print("\n── ACCOUNT DETAILS ──────────────────────────────────────")
+    user = authlxapp.user_data
+    if not user.username:
+        print("  Not logged in.")
+        return
+        
+    print(f"  Username       : {user.username}")
+    print(f"  HWID Bound     : {user.hwid or 'N/A'}")
+    print(f"  Subscription   : {user.subscription or 'N/A'}")
+    print(f"  Expires        : {user.expires or 'N/A'}")
+    print(f"  Last Login     : {user.lastlogin or 'N/A'}")
+    print(f"  Created At     : {user.createdate or 'N/A'}")
+
+    if user.subscriptions:
+        print(f"  All Subs       : {user.subscriptions}")
+
 # ═══════════════════════════════════════════════════════════════════
 #   MENUS
 # ═══════════════════════════════════════════════════════════════════
@@ -370,10 +390,11 @@ def menu_main():
 def menu_account():
     print("\n  ACCOUNT MENU")
     print("  ─────────────────────────────────────────────────────")
-    print("  [1]  Change Username")
-    print("  [2]  Upgrade Account  (apply another license key)")
-    print("  [3]  Verify Session")
-    print("  [4]  Logout")
+    print("  [1]  Account Details  (view info & expiry)")
+    print("  [2]  Change Username")
+    print("  [3]  Upgrade Account  (apply another license key)")
+    print("  [4]  Verify Session")
+    print("  [5]  Logout")
     print("  [0]  Back")
     return input("\n  › ").strip()
 
@@ -403,12 +424,14 @@ def main():
         if logged_in:
             choice = menu_account()
             if choice == "1":
-                example_change_username(authlxapp)
+                example_account_details(authlxapp)
             elif choice == "2":
-                example_upgrade(authlxapp)
+                example_change_username(authlxapp)
             elif choice == "3":
-                example_verify_session(authlxapp)
+                example_upgrade(authlxapp)
             elif choice == "4":
+                example_verify_session(authlxapp)
+            elif choice == "5":
                 example_logout(authlxapp)
                 logged_in = False
             elif choice == "0":
