@@ -32,6 +32,7 @@ import logging
 import platform
 import subprocess
 import threading
+import getpass
 from urllib.parse import urlparse
 
 logging.basicConfig(
@@ -199,7 +200,7 @@ class api:
             logger.error("Must be logged in.")
             return False
         response = self._do_request("/change-username", {
-            "app_id": self.ownerid, "current_username": self.user_data.username,
+            "app_id": self.ownerid, "session_token": self.session_token,
             "new_username": new_username,
         })
         if response and response.get("status") == "success":
@@ -544,7 +545,7 @@ def main():
 
         if choice == "1":
             user     = input("  Username : ").strip()
-            password = input("  Password : ").strip()
+            password = getpass.getpass("  Password : ").strip()
 
             # ─── LOGIN GATE ───────────────────────────────────────────────
             if authlxapp.login(user, password):
@@ -556,7 +557,7 @@ def main():
         elif choice == "2":
             user     = input("  Username    : ").strip()
             email    = input("  Email       : ").strip()
-            password = input("  Password    : ").strip()
+            password = getpass.getpass("  Password    : ").strip()
             key      = input("  License Key : ").strip()
             if authlxapp.register(user, email, password, key):
                 print("  ✓ Registered! You can now log in.")

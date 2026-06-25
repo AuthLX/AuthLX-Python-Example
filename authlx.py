@@ -283,7 +283,13 @@ class api:
         """
         others.anti_debug()
 
-        response = self._do_request("/init", {"app_id": self.ownerid})
+        payload = {
+            "app_id": self.ownerid,
+            "name": self.name,
+            "version": self.version,
+            "secret": self._client_secret or "NO_SECRET"
+        }
+        response = self._do_request("/init", payload)
 
         if response and response.get("status") == "success":
             app_info       = response.get("app_info", {})
@@ -565,7 +571,7 @@ class api:
         self, user: str, email: str, password: str, license_key: str
     ) -> bool:
         """Register without binding a HWID (web-flow registration)."""
-        return self.register(user, email, password, license_key, hwid="")
+        return self.register(user, email, password, license_key, hwid="WEB_REGISTRATION")
 
     # ── License operations ────────────────────────────────────────────────────
 
@@ -678,7 +684,7 @@ class api:
             "/change-username",
             {
                 "app_id":           self.ownerid,
-                "current_username": self.user_data.username,
+                "session_token":    self.session_token,
                 "new_username":     new_username,
             },
         )
