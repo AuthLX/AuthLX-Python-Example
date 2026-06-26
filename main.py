@@ -127,9 +127,8 @@ def init_sdk() -> api:
     )
 
     # Restrict all HTTP to the AuthLX domain (optional host-locking)
-    authlxapp.set_allowed_hosts(["authlx.com"])
-
-    mode = "SECURE (HMAC + auto-whitelist)" if APP_CLIENT_SECRET else "OFF (no hash check)"
+    # If APP_CLIENT_SECRET is missing, it falls back to OFF MODE (no hash check).
+    mode = "SECURE (HMAC + TOFU Hash)" if APP_CLIENT_SECRET else "OFF (no hash check)"
     print(f"✓ Initialised in {mode} mode.")
     print(f"  HWID Method : {authlxapp.hwid_method}")
     print(f"  HWID        : {others.get_hwid(method=authlxapp.hwid_method)}")
@@ -150,9 +149,11 @@ def example_login(authlxapp: api) -> bool:
     The SDK automatically:
       • Detects the HWID using the method from the dashboard.
       • Computes the SHA-256 hash of this file/exe.
-      • In SECURE MODE: signs the hash with HMAC + timestamp + nonce.
-      • Sends everything in one request.
-      • Backend verifies and auto-whitelists the hash if HMAC is valid.
+      • Mode 1: SECURE (Recommended)
+      • Provide `APP_CLIENT_SECRET`.
+      • SDK sends: file hash + HMAC signature + timestamp + nonce.
+      • Backend verifies HMAC. If valid, the FIRST hash is auto-whitelisted (Trust On First Use).
+      • IMPORTANT: For all future builds/updates, you MUST click "Reset All Hashes" in dashboard!
     """
     print("\n── LOGIN ──────────────────────────────────────────────")
     user     = input("  Username : ").strip()

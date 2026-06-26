@@ -31,8 +31,9 @@ A production-ready client SDK for the AuthLX authentication platform.
       hash_timestamp = current Unix time (5-minute expiry window)
       hash_nonce     = random 32-hex string (single-use, 10-min block)
   • Backend verifies all three fields before allowing login.
-  • If signature is valid, the hash is AUTO-WHITELISTED — no manual
-    dashboard work needed, even after every new build.
+  • The FIRST valid hash received is AUTO-WHITELISTED (Trust-On-First-Use).
+  • All subsequent logins must match this hash. If you compile a NEW build, 
+    you MUST click "Reset All Hashes" in your dashboard so it learns the new hash.
   • Network replay is impossible: nonce is consumed once; timestamp expires.
   • Attacker must EXTRACT the client_secret from your binary to forge
     a valid HMAC — protect it with PyArmor, Nuitka, or similar tools.
@@ -79,7 +80,8 @@ A production-ready client SDK for the AuthLX authentication platform.
       pyinstaller --onefile dist/main.py
 
   Step 3: Ship the .exe — client_secret is now inside encrypted bytecode.
-  Step 4: No manual hash whitelisting ever — the HMAC auto-registers it.
+  Step 4: Enable Hash Check in Dashboard. Run the app once to auto-whitelist it.
+          When you release an update, click "Reset All Hashes" before running it.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -152,7 +154,8 @@ class api:
 
         ► Provide this for SECURE MODE (recommended):
           • Every request is HMAC-signed with this secret.
-          • Hashes are auto-whitelisted — no dashboard work after each build.
+          • The very first hash is auto-whitelisted (Trust On First Use).
+          • For future updates, click "Reset All Hashes" in dashboard.
           • Network replay attacks are blocked via timestamp + nonce.
 
         ► Omit for OFF MODE (developer opt-out):
@@ -318,7 +321,7 @@ class api:
             self.initialized = True
             self.hwid_method = app_info.get("hwid_method", "windows_user")
 
-            mode = "SECURE (HMAC + auto-whitelist)" if self._client_secret else "OFF (no hash protection)"
+            mode = "SECURE (HMAC + TOFU Hash)" if self._client_secret else "OFF (no hash protection)"
             if self._debug:
                 logger.debug(f"Hash mode: {mode}")
         else:
@@ -380,7 +383,8 @@ class api:
           • HMAC signature + timestamp + nonce are computed and sent automatically.
           • The backend verifies HMAC → rejects if secret doesn't match.
           • The nonce is consumed server-side → replay is impossible.
-          • The hash is auto-whitelisted → no manual dashboard work needed.
+          • The first hash is auto-whitelisted (TOFU). If the hash doesn't match
+            the whitelist, the request is blocked.
 
         In OFF MODE (no client_secret):
           • Only hash string is sent. Backend ignores it.
