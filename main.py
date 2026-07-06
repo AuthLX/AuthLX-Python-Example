@@ -43,13 +43,13 @@ from authlx import api, others
 # ═══════════════════════════════════════════════════════════════════
 #   CONFIGURATION — fill in from AuthLX Dashboard → App Info
 # ═══════════════════════════════════════════════════════════════════
-APP_NAME    = "Premium"
-APP_ID      = "22c71ed0-c61d-4816-b2a1-3ad0a72d9de1"         # ← App UUID from Dashboard
+APP_NAME    = "MyApp"
+APP_ID      = "YOUR-APP-UUID-HERE"         # ← App UUID from Dashboard
 APP_VERSION = "1.0"
 
 # ► SECURE MODE:  paste your Client Secret here
 # ► OFF MODE:     leave as None
-APP_CLIENT_SECRET = "91cace5bbc7fe4fe3503972ac2c351cb91cd680126c4a55ac954484c24448d50"   # ← Client Secret from Dashboard
+APP_CLIENT_SECRET = "YOUR-CLIENT-SECRET-HERE"   # ← Client Secret from Dashboard
 
 # ► Development override: set to "dev-skip" only while actively editing code.
 #   Remove (set to None) before compiling your final .exe for users.
