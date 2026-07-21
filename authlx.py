@@ -90,6 +90,7 @@ import os
 import sys
 import time
 import hmac
+import shutil
 import hashlib
 import logging
 import platform
@@ -127,7 +128,21 @@ except ModuleNotFoundError:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#   api  —  main SDK class
+#   UpdateInfo  --  auto-updater data container
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class UpdateInfo:
+    """Holds auto-updater metadata returned by check_for_updates()."""
+    def __init__(self):
+        self.update_available: bool = False
+        self.current_version: str   = ""
+        self.latest_version: str    = ""
+        self.download_url: str      = ""
+        self.file_name: str         = ""
+        self.release_notes: str     = ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   api  --  main SDK class
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class api:
     """
@@ -270,6 +285,10 @@ class api:
         self._ban_monitor_thread: threading.Thread = None
         self._ban_monitor_active: bool             = False
 
+        # Auto-Updater
+        self.auto_update_enabled: bool = True
+        self.update_info: UpdateInfo   = UpdateInfo()
+
         # Auto-init on construction
         self.init()
 
@@ -284,6 +303,19 @@ class api:
         Exits the process if the app is disabled, unreachable, or outdated.
         Anti-debug runs automatically inside this call.
         """
+        # Intercept --authlx-update-finish stage before anything else
+        self.handle_update_stage()
+
+        # Cleanup previous .old backup if it exists
+        current_exe = self.get_current_executable_path()
+        if current_exe:
+            old_backup = current_exe + ".old"
+            if os.path.exists(old_backup):
+                try:
+                    os.remove(old_backup)
+                except Exception:
+                    pass
+
         others.anti_debug()
 
         payload = {
@@ -309,13 +341,14 @@ class api:
             if server_version != self.version:
                 logger.critical("\n[UPDATE REQUIRED] Application version is outdated!")
                 logger.critical(f"  Current: {self.version}  |  Required: {server_version}")
-                auto_update = app_info.get("auto_update_link")
-                webloader   = app_info.get("webloader_link")
-                if auto_update:
-                    logger.critical(f"  Download: {auto_update}")
-                if webloader:
-                    logger.critical(f"  Webloader: {webloader}")
-                time.sleep(5)
+                
+                if self.auto_update_enabled:
+                    logger.info(f"[AUTO-UPDATE] Initiating auto-update to v{server_version}...")
+                    info = self.check_for_updates()
+                    if info.update_available:
+                        self.perform_update(info)
+
+                time.sleep(3)
                 os._exit(1)
 
             self.initialized = True
@@ -1094,6 +1127,264 @@ class api:
         """Hook point for TLS public-key pinning. Extend as needed."""
         if self._debug:
             logger.debug(f"[PIN] Key pinning check for {url}")
+
+    # ── Auto-Updater ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_frozen() -> bool:
+        """Return True when running as a PyInstaller/Nuitka compiled binary."""
+        return getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')
+
+    @staticmethod
+    def get_current_executable_path() -> str:
+        """
+        Return the absolute, resolved path of the running script or compiled binary.
+        Works on Windows (.exe) and Linux (ELF binary or .py script).
+        """
+        try:
+            # PyInstaller / Nuitka frozen binary
+            if api._is_frozen():
+                path = os.path.realpath(sys.executable)
+                return os.path.abspath(path)
+        except Exception:
+            pass
+
+        # Plain Python script: use argv[0] which the OS passed to us
+        try:
+            if sys.argv and sys.argv[0] and sys.argv[0] != "":
+                path = os.path.realpath(sys.argv[0])
+                return os.path.abspath(path)
+        except Exception:
+            pass
+
+        return os.path.abspath(os.path.realpath(__file__))
+
+    @staticmethod
+    def _wait_file_unlocked(path: str, timeout_secs: float = 10.0):
+        """
+        Cross-platform wait until a file can be opened exclusively.
+        On Linux, executables are never truly locked, so we just
+        do a short sleep to let the old process exit gracefully.
+        On Windows, we poll with open() until the lock releases.
+        """
+        if platform.system() == "Windows":
+            deadline = time.time() + timeout_secs
+            while time.time() < deadline:
+                try:
+                    # Try to open with exclusive access
+                    fd = open(path, "r+b")
+                    fd.close()
+                    return  # Lock released — safe to rename
+                except (IOError, OSError, PermissionError):
+                    time.sleep(0.2)
+        else:
+            # On Linux, files are not locked by the OS even when running;
+            # wait for the parent PID to disappear (heuristic: 1.5s sleep)
+            time.sleep(1.5)
+
+    @staticmethod
+    def handle_update_stage():
+        """
+        Intercept Stage 2 process handoff (--authlx-update-finish <old_path>).
+        Runs ONLY when the newly-downloaded binary is executed with that flag.
+        Waits for original process exit, replaces the file, relaunches, then exits.
+        Compatible with Windows and Linux for both .py scripts and compiled binaries.
+        """
+        try:
+            if "--authlx-update-finish" not in sys.argv:
+                return
+
+            finish_idx = sys.argv.index("--authlx-update-finish")
+            if finish_idx + 1 >= len(sys.argv):
+                logger.error("[AUTO-UPDATE STAGE 2] Missing target path argument.")
+                return
+
+            target_path = os.path.abspath(os.path.realpath(sys.argv[finish_idx + 1]))
+            if not target_path or not os.path.exists(target_path):
+                logger.error(f"[AUTO-UPDATE STAGE 2] Target not found: {target_path}")
+                # Target already gone (overwritten?) — try to just launch it
+                if target_path and os.path.exists(target_path):
+                    pass
+                else:
+                    os._exit(0)
+
+            current_path = api.get_current_executable_path()
+            if not current_path or not os.path.exists(current_path):
+                logger.error("[AUTO-UPDATE STAGE 2] Could not resolve current binary path.")
+                return
+
+            logger.info(f"[AUTO-UPDATE STAGE 2] Waiting for original process to release: {target_path}")
+            api._wait_file_unlocked(target_path)
+
+            backup_path = target_path + ".old"
+            # Clean up any pre-existing backup
+            if os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                except Exception:
+                    pass
+
+            # On Windows, os.rename to an existing path raises; shutil.move handles it.
+            # Step 1: old_exe → old_exe.old
+            shutil.move(target_path, backup_path)
+
+            # Step 2: new_exe.new → old_exe  (current process IS new_exe.new)
+            shutil.move(current_path, target_path)
+
+            # Step 3: On Linux ensure the replacement binary is executable
+            if platform.system() != "Windows":
+                try:
+                    os.chmod(target_path, 0o755)
+                except Exception:
+                    pass
+
+            # Step 4: Relaunch the (now-replaced) original path
+            logger.info(f"[AUTO-UPDATE STAGE 2] Launching updated binary: {target_path}")
+            if target_path.lower().endswith(".py"):
+                # Script mode — must run through Python interpreter
+                subprocess.Popen([sys.executable, target_path],
+                                 close_fds=True,
+                                 start_new_session=True)
+            else:
+                # Compiled binary (PyInstaller .exe on Windows, ELF on Linux)
+                subprocess.Popen([target_path],
+                                 close_fds=True,
+                                 start_new_session=True)
+
+            os._exit(0)
+        except Exception as e:
+            logger.error(f"[AUTO-UPDATE STAGE 2 ERROR] {e}")
+
+    def _download_file_http(self, url: str, target_path: str) -> bool:
+        """Download file via requests with streaming and redirect handling."""
+        if not url or not target_path:
+            return False
+        try:
+            headers = {"User-Agent": f"AuthLX-SDK-Python/1.0 ({self.name} v{self.version})"}
+            with self._session.get(url, headers=headers, stream=True,
+                                   timeout=30, allow_redirects=True) as r:
+                r.raise_for_status()
+                with open(target_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+            return os.path.exists(target_path) and os.path.getsize(target_path) > 0
+        except Exception as e:
+            logger.error(f"[DOWNLOAD ERROR] Failed to download update: {e}")
+            return False
+
+    def check_for_updates(self) -> "UpdateInfo":
+        """Check AuthLX backend for available software updates."""
+        info = UpdateInfo()
+        info.current_version = self.version
+
+        payload = {
+            "app_id": self.ownerid,
+            "name": self.name,
+            "version": self.version,
+            "secret": self._client_secret or "NO_SECRET"
+        }
+
+        latest_ver = ""
+        dl_url = ""
+        file_n = ""
+
+        # 1. Query /init — may return auto_update_link and version
+        response = self._do_request("/init", payload)
+        if response and response.get("status") == "success":
+            app_info   = response.get("app_info") or {}
+            latest_ver = app_info.get("version", "")
+            dl_url     = app_info.get("auto_update_link", "")
+
+        # 2. Query /file/latest — authoritative release info
+        file_res = self._do_request("/file/latest", payload)
+        if file_res and file_res.get("status") == "success":
+            data     = file_res.get("data") or {}
+            file_obj = data.get("file") or {}
+            if file_obj:
+                if not latest_ver:
+                    latest_ver = file_obj.get("version_tag", "")
+                if not dl_url:
+                    dl_url = file_obj.get("download_url", "")
+                if not file_n:
+                    file_n = file_obj.get("name", "")
+
+        # Fallback: direct download endpoint
+        if not dl_url:
+            dl_url = f"{self.api_url}/file/latest/download?app_id={self.ownerid}"
+
+        info.latest_version = latest_ver or self.version
+        info.download_url   = dl_url
+        info.file_name      = file_n
+
+        if info.latest_version and info.latest_version != self.version:
+            info.update_available = True
+
+        self.update_info = info
+        return info
+
+    def perform_update(self, info: "UpdateInfo") -> bool:
+        """
+        Download the update binary to <current_exe>.new, then spawn it with
+        --authlx-update-finish <current_exe> and exit, triggering Stage 2.
+        Works for Windows .exe, Linux ELF binary, and Python scripts.
+        """
+        if not info or not info.update_available or not info.download_url:
+            logger.error("[AUTO-UPDATE] No valid update download URL available.")
+            return False
+
+        current_exe = self.get_current_executable_path()
+        if not current_exe:
+            logger.error("[AUTO-UPDATE] Could not determine current binary path.")
+            return False
+
+        new_temp_path = current_exe + ".new"
+        logger.info(f"[AUTO-UPDATE] Downloading update from: {info.download_url}")
+
+        if not self._download_file_http(info.download_url, new_temp_path):
+            logger.error("[AUTO-UPDATE] Download failed.")
+            if os.path.exists(new_temp_path):
+                try:
+                    os.remove(new_temp_path)
+                except Exception:
+                    pass
+            return False
+
+        # On Linux, make the downloaded binary executable before spawning it
+        if platform.system() != "Windows":
+            try:
+                os.chmod(new_temp_path, 0o755)
+            except Exception:
+                pass
+
+        logger.info("[AUTO-UPDATE] Download complete. Spawning updater process...")
+
+        try:
+            if new_temp_path.lower().endswith(".py"):
+                # Script: run through current Python interpreter
+                cmd = [sys.executable, new_temp_path,
+                       "--authlx-update-finish", current_exe]
+            elif self._is_frozen():
+                # Compiled binary (PyInstaller/Nuitka) — run directly
+                cmd = [new_temp_path, "--authlx-update-finish", current_exe]
+            else:
+                # Plain Python running a non-.py path (unusual) — use interpreter
+                cmd = [sys.executable, new_temp_path,
+                       "--authlx-update-finish", current_exe]
+
+            subprocess.Popen(cmd, close_fds=True, start_new_session=True)
+
+            logger.info("[AUTO-UPDATE] Updater spawned. Exiting current process.")
+            os._exit(0)
+            return True
+        except Exception as e:
+            logger.error(f"[AUTO-UPDATE] Failed to spawn updater process: {e}")
+            if os.path.exists(new_temp_path):
+                try:
+                    os.remove(new_temp_path)
+                except Exception:
+                    pass
+            return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

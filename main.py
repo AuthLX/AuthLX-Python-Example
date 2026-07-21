@@ -369,6 +369,27 @@ def example_account_details(authlxapp: api):
     if user.subscriptions:
         print(f"  All Subs       : {user.subscriptions}")
 
+
+def example_check_updates(authlxapp: api):
+    """Example: Manually check for software updates and install them."""
+    print("\n── CHECK & INSTALL UPDATES ─────────────────────────────")
+    print(f"  Current Version : {authlxapp.version}")
+    print("  Checking server for latest release...")
+
+    info = authlxapp.check_for_updates()
+    print(f"  Latest Version  : {info.latest_version or 'Unknown'}")
+
+    if info.update_available:
+        print(f"  ✓ Update Available! (v{info.current_version} → v{info.latest_version})")
+        print(f"  Download URL    : {info.download_url}")
+        choice = input("\n  Install update now? (y/N): ").strip().lower()
+        if choice in ("y", "yes"):
+            authlxapp.perform_update(info)
+        else:
+            print("  Update deferred by user.")
+    else:
+        print("  ✓ You are running the latest version.")
+
 # ═══════════════════════════════════════════════════════════════════
 #   MENUS
 # ═══════════════════════════════════════════════════════════════════
@@ -384,6 +405,7 @@ def menu_main():
     print("  [6]  Verify Standalone API Token")
     print("  [7]  Show HWID methods")
     print("  [8]  Debug Info")
+    print("  [9]  Check & Install Updates")
     print("  [0]  Exit")
     return input("\n  › ").strip()
 
@@ -455,6 +477,8 @@ def main():
                 example_hwid(authlxapp)
             elif choice == "8":
                 example_debug_info(authlxapp)
+            elif choice == "9":
+                example_check_updates(authlxapp)
             elif choice == "0":
                 print("\nGoodbye.")
                 break
