@@ -1256,7 +1256,7 @@ class api:
             logger.error(f"[AUTO-UPDATE STAGE 2 ERROR] {e}")
 
     def _download_file_http(self, url: str, target_path: str) -> bool:
-        """Download file via requests with streaming and redirect handling."""
+        """Download file via requests with streaming, redirect handling, and progress display."""
         if not url or not target_path:
             return False
         try:
@@ -1264,12 +1264,34 @@ class api:
             with self._session.get(url, headers=headers, stream=True,
                                    timeout=30, allow_redirects=True) as r:
                 r.raise_for_status()
+                total_bytes = int(r.headers.get("Content-Length", 0))
+                downloaded  = 0
+                last_pct    = -1
+
                 with open(target_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_bytes > 0:
+                                pct = int(downloaded * 100 / total_bytes)
+                                if pct != last_pct:
+                                    bar_filled = pct // 5
+                                    bar = "█" * bar_filled + "░" * (20 - bar_filled)
+                                    mb_done  = downloaded / (1024 * 1024)
+                                    mb_total = total_bytes / (1024 * 1024)
+                                    print(f"\r  [{bar}] {pct:3d}%  {mb_done:.1f} / {mb_total:.1f} MB",
+                                          end="", flush=True)
+                                    last_pct = pct
+                            else:
+                                mb_done = downloaded / (1024 * 1024)
+                                print(f"\r  Downloading... {mb_done:.1f} MB",
+                                      end="", flush=True)
+
+                print()  # newline after progress bar
             return os.path.exists(target_path) and os.path.getsize(target_path) > 0
         except Exception as e:
+            print()  # newline if progress was mid-line
             logger.error(f"[DOWNLOAD ERROR] Failed to download update: {e}")
             return False
 

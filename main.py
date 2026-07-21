@@ -53,7 +53,7 @@ APP_CLIENT_SECRET = "YOUR-CLIENT-SECRET-HERE"   # ← Client Secret from Dashboa
 
 # ► Development override: set to "dev-skip" only while actively editing code.
 #   Remove (set to None) before compiling your final .exe for users.
-HASH_OVERRIDE = None    # e.g. "dev-skip"  ← only for local testing
+HASH_OVERRIDE = None    # None = auto-compute real SHA-256 of this binary
 
 # ═══════════════════════════════════════════════════════════════════
 #   SDK INITIALISATION EXAMPLES
