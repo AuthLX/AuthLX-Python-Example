@@ -1255,6 +1255,64 @@ class api:
         except Exception as e:
             logger.error(f"[AUTO-UPDATE STAGE 2 ERROR] {e}")
 
+    def _validate_download_url(self, url: str) -> tuple:
+        """
+        Validate that a URL is reachable and appears to be a direct file download.
+        Returns (is_valid: bool, error_message: str).
+        """
+        if not url or not url.strip():
+            return False, "No download URL provided. Set the auto_update_link in your AuthLX Dashboard."
+
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return False, f"Invalid URL format: '{url}'. URL must start with http:// or https://."
+
+        try:
+            headers = {"User-Agent": f"AuthLX-SDK-Python/1.0 ({self.name} v{self.version})"}
+            # HEAD request first to check reachability without full download
+            head = self._session.head(url, headers=headers, timeout=10,
+                                      allow_redirects=True)
+            status = head.status_code
+            if status == 404:
+                return False, (
+                    f"Download URL returned 404 Not Found.\n"
+                    f"  URL: {url}\n"
+                    f"  → The file may have been deleted or the URL is incorrect.\n"
+                    f"  → Please upload the update file and set the correct URL in your Dashboard."
+                )
+            if status == 403:
+                return False, (
+                    f"Download URL returned 403 Forbidden.\n"
+                    f"  URL: {url}\n"
+                    f"  → The server is blocking access. Check file permissions or use a public link."
+                )
+            if status >= 400:
+                return False, (
+                    f"Download URL returned HTTP {status}.\n"
+                    f"  URL: {url}\n"
+                    f"  → Please verify the URL is correct and the file is publicly accessible."
+                )
+
+            # Check Content-Type — HTML pages are NOT direct download links
+            ct = head.headers.get("Content-Type", "").lower()
+            if "text/html" in ct:
+                return False, (
+                    f"The URL does not point to a direct file download.\n"
+                    f"  URL: {url}\n"
+                    f"  Content-Type received: {ct}\n"
+                    f"  💡 Tip: Use a direct download link, not a webpage URL.\n"
+                    f"      Example: https://example.com/files/myapp-v2.0 (no HTML, no login page)"
+                )
+
+            return True, ""
+
+        except Exception as e:
+            return False, (
+                f"Could not reach the download URL.\n"
+                f"  URL: {url}\n"
+                f"  Error: {e}\n"
+                f"  → Check your internet connection and verify the URL is reachable."
+            )
+
     def _download_file_http(self, url: str, target_path: str) -> bool:
         """Download file via requests with streaming, redirect handling, and progress display."""
         if not url or not target_path:
@@ -1263,7 +1321,25 @@ class api:
             headers = {"User-Agent": f"AuthLX-SDK-Python/1.0 ({self.name} v{self.version})"}
             with self._session.get(url, headers=headers, stream=True,
                                    timeout=30, allow_redirects=True) as r:
-                r.raise_for_status()
+                status = r.status_code
+                if status != 200:
+                    logger.error(
+                        f"[DOWNLOAD ERROR] Server returned HTTP {status} for URL:\n"
+                        f"  {url}\n"
+                        f"  → Ensure the URL is a direct download link and the file exists."
+                    )
+                    return False
+
+                ct = r.headers.get("Content-Type", "").lower()
+                if "text/html" in ct:
+                    logger.error(
+                        f"[DOWNLOAD ERROR] URL returned an HTML page, not a file.\n"
+                        f"  URL: {url}\n"
+                        f"  💡 Tip: The auto_update_link must be a DIRECT download URL (not a webpage).\n"
+                        f"      Set a direct link in: Dashboard → App Settings → Auto Update Link"
+                    )
+                    return False
+
                 total_bytes = int(r.headers.get("Content-Length", 0))
                 downloaded  = 0
                 last_pct    = -1
@@ -1289,7 +1365,11 @@ class api:
                                       end="", flush=True)
 
                 print()  # newline after progress bar
-            return os.path.exists(target_path) and os.path.getsize(target_path) > 0
+
+            if not os.path.exists(target_path) or os.path.getsize(target_path) == 0:
+                logger.error("[DOWNLOAD ERROR] Downloaded file is empty or missing.")
+                return False
+            return True
         except Exception as e:
             print()  # newline if progress was mid-line
             logger.error(f"[DOWNLOAD ERROR] Failed to download update: {e}")
@@ -1331,18 +1411,24 @@ class api:
                 if not file_n:
                     file_n = file_obj.get("name", "")
 
-        # Fallback: direct download endpoint
-        if not dl_url:
-            dl_url = f"{self.api_url}/file/latest/download?app_id={self.ownerid}"
-
         info.latest_version = latest_ver or self.version
-        info.download_url   = dl_url
         info.file_name      = file_n
 
         if info.latest_version and info.latest_version != self.version:
             info.update_available = True
+            if not dl_url:
+                logger.warning(
+                    f"[AUTO-UPDATE] A new version ({info.latest_version}) was found "
+                    f"but no download URL is set.\n"
+                    f"  → Go to Dashboard → Files → Upload the update binary.\n"
+                    f"  💡 Tip: Set a direct download link as the auto_update_link "
+                    f"(not a webpage, not a redirect page)."
+                )
+                # Fallback: try the generic download endpoint
+                dl_url = f"{self.api_url}/file/latest/download?app_id={self.ownerid}"
 
-        self.update_info = info
+        info.download_url = dl_url
+        self.update_info  = info
         return info
 
     def perform_update(self, info: "UpdateInfo") -> bool:
@@ -1351,8 +1437,29 @@ class api:
         --authlx-update-finish <current_exe> and exit, triggering Stage 2.
         Works for Windows .exe, Linux ELF binary, and Python scripts.
         """
-        if not info or not info.update_available or not info.download_url:
-            logger.error("[AUTO-UPDATE] No valid update download URL available.")
+        if not info or not info.update_available:
+            logger.error("[AUTO-UPDATE] No update is available to install.")
+            return False
+
+        if not info.download_url:
+            logger.error(
+                "[AUTO-UPDATE] Cannot install update: no download URL is available.\n"
+                "  → Upload the update binary in your AuthLX Dashboard → Files section.\n"
+                "  💡 Tip: The auto_update_link must be a DIRECT download URL "
+                "(binary/executable), not a webpage."
+            )
+            return False
+
+        # Validate URL before downloading
+        logger.info(f"[AUTO-UPDATE] Validating download URL: {info.download_url}")
+        print(f"  💡 Tip: Make sure the URL above is a direct download link, not a webpage.")
+        is_valid, err_msg = self._validate_download_url(info.download_url)
+        if not is_valid:
+            logger.error(f"[AUTO-UPDATE] URL validation failed:\n{err_msg}")
+            logger.error(
+                "[AUTO-UPDATE] Continuing without update. "
+                "The application will keep running the current version."
+            )
             return False
 
         current_exe = self.get_current_executable_path()
@@ -1364,7 +1471,10 @@ class api:
         logger.info(f"[AUTO-UPDATE] Downloading update from: {info.download_url}")
 
         if not self._download_file_http(info.download_url, new_temp_path):
-            logger.error("[AUTO-UPDATE] Download failed.")
+            logger.error(
+                "[AUTO-UPDATE] Download failed. The application will keep running the current version.\n"
+                "  💡 Tip: Ensure the auto_update_link in your Dashboard is a direct download URL."
+            )
             if os.path.exists(new_temp_path):
                 try:
                     os.remove(new_temp_path)
