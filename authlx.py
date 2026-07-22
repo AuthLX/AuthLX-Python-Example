@@ -604,6 +604,104 @@ class api:
         logger.error(msg)
         return False
 
+    # ── Variable Management ───────────────────────────────────────────────────
+
+    def var(self, name: str) -> str:
+        """
+        Fetch a Global Application Variable by name.
+        If logged in, the session token is automatically included for authenticated variables.
+
+        Parameters
+        ----------
+        name : str
+            Name of the global variable set in the AuthLX Dashboard.
+
+        Returns
+        -------
+        str
+            String value of the variable, or empty string on failure.
+        """
+        self._checkinit()
+        payload = {
+            "app_id": self.ownerid,
+            "secret": self._client_secret or "",
+            "variable_name": name,
+        }
+        if self.session_token:
+            payload["session_token"] = self.session_token
+
+        response = self._do_request("/var", payload)
+        if response and response.get("status") == "success":
+            data = response.get("data", {})
+            val = data.get("value", "")
+            return str(val) if val is not None else ""
+        return ""
+
+    def get_user_var(self, key: str) -> str:
+        """
+        Fetch a Per-User Variable for the currently logged in user session.
+
+        Parameters
+        ----------
+        key : str
+            Key/Name of the user variable.
+
+        Returns
+        -------
+        str
+            String value of the user variable, or empty string if not found.
+        """
+        self._checkinit()
+        if not self.session_token:
+            logger.error("Session token required to fetch user variables. Please log in first.")
+            return ""
+
+        payload = {
+            "app_id": self.ownerid,
+            "secret": self._client_secret or "",
+            "session_token": self.session_token,
+            "key": key,
+        }
+
+        response = self._do_request("/vars/user/get", payload)
+        if response and response.get("status") == "success":
+            data = response.get("data", {})
+            val = data.get("value", "")
+            return str(val) if val is not None else ""
+        return ""
+
+    def set_user_var(self, key: str, value: str) -> bool:
+        """
+        Create or update a Per-User Variable for the currently logged in user.
+
+        Parameters
+        ----------
+        key : str
+            Key/Name of the user variable.
+        value : str
+            Value to store for the user.
+
+        Returns
+        -------
+        bool
+            True if saved successfully, False if failed or read-only.
+        """
+        self._checkinit()
+        if not self.session_token:
+            logger.error("Session token required to set user variables. Please log in first.")
+            return False
+
+        payload = {
+            "app_id": self.ownerid,
+            "secret": self._client_secret or "",
+            "session_token": self.session_token,
+            "key": key,
+            "value": value,
+        }
+
+        response = self._do_request("/vars/user/set", payload)
+        return bool(response and response.get("status") == "success")
+
     def register_web(
         self, user: str, email: str, password: str, license_key: str
     ) -> bool:
