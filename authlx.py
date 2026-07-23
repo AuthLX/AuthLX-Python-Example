@@ -353,8 +353,8 @@ class api:
                 if self.auto_update_enabled:
                     logger.info(f"[AUTO-UPDATE] Initiating auto-update to {server_version}...")
                     info = self.check_for_updates()
-                    if info.update_available:
-                        self.perform_update(info)
+                    info.update_available = True
+                    self.perform_update(info)
 
                 time.sleep(3)
                 os._exit(1)
@@ -1486,98 +1486,78 @@ class api:
         info = UpdateInfo()
         info.current_version = self.version
 
-        payload = {
-            "app_id": self.ownerid,
-            "name": self.name,
-            "version": self.version,
-            "secret": self._client_secret or "NO_SECRET"
-        }
+        try:
+            payload = {
+                "app_id": self.ownerid,
+                "name": self.name,
+                "version": self.version,
+                "secret": self._client_secret or "NO_SECRET"
+            }
 
-        latest_ver = ""
-        dl_url = ""
-        file_n = ""
+            latest_ver = ""
+            dl_url = ""
+            file_n = ""
 
-        # 1. Query /file/latest first — authoritative latest release file info from Files manager
-        file_res = self._do_request("/file/latest", payload)
-        if file_res and file_res.get("status") == "success":
-            data     = file_res.get("data") or {}
-            file_obj = data.get("file") or {}
-            if file_obj:
-                latest_ver = file_obj.get("version_tag", "")
-                dl_url     = file_obj.get("download_url", "")
-                file_n     = file_obj.get("name", "")
+            def clean_ver(v: str) -> str:
+                if not v:
+                    return ""
+                v = str(v).strip()
+                if v.lower().startswith("v"):
+                    v = v[1:]
+                return v
 
-        # 2. Query /init — fallback for app_info
-        response = self._do_request("/init", payload)
-        if response and response.get("status") == "success":
-            app_info   = response.get("app_info") or {}
-            if not latest_ver:
-                latest_ver = app_info.get("version", "")
-            if not dl_url:
-                dl_url     = app_info.get("auto_update_link", "")
+            # 1. Query /file/latest first — authoritative latest release file info from Files manager
+            file_res = self._do_request("/file/latest", payload)
+            if file_res and file_res.get("status") == "success":
+                data     = file_res.get("data") or {}
+                file_obj = data.get("file") or {}
+                if file_obj:
+                    latest_ver = file_obj.get("version_tag", "")
+                    dl_url     = file_obj.get("download_url", "")
+                    file_n     = file_obj.get("name", "")
 
-        info.latest_version = latest_ver or self.version
-        info.file_name      = file_n
+            # 2. Query /init — fallback for app_info
+            response = self._do_request("/init", payload)
+            init_ver = ""
+            if response and response.get("status") == "success":
+                app_info   = response.get("app_info") or {}
+                init_ver   = app_info.get("version", "")
+                if not latest_ver:
+                    latest_ver = init_ver
+                if not dl_url:
+                    dl_url     = app_info.get("auto_update_link", "")
 
-        # Version comparison with leading 'v'/'V' normalization
-        def clean_ver(v: str) -> str:
-            if not v:
-                return ""
-            v = v.strip()
-            if v.lower().startswith("v"):
-                v = v[1:]
-            return v
+            info.latest_version = latest_ver or init_ver or self.version
+            info.file_name      = file_n
 
-        clean_current = clean_ver(self.version)
-        clean_latest = clean_ver(info.latest_version)
+            clean_current = clean_ver(self.version)
+            clean_latest  = clean_ver(info.latest_version)
+            clean_init    = clean_ver(init_ver)
 
-        if info.latest_version and clean_latest != clean_current:
-            info.update_available = True
-            if not dl_url:
-                logger.warning(
-                    f"[AUTO-UPDATE] A new version ({info.latest_version}) was found "
-                    f"but no download URL is set.\n"
-                    f"  → Go to Dashboard → Files → Upload the update binary.\n"
-                    f"  💡 Tip: Set a direct download link as the auto_update_link "
-                    f"(not a webpage, not a redirect page)."
-                )
-                dl_url = f"{self.api_url}/download/latest/{self.name}"
-        elif not dl_url:
+            if (info.latest_version and clean_latest != clean_current) or (clean_init and clean_init != clean_current):
+                info.update_available = True
+
+            # Always target the Latest Mark release endpoint (/download/latest/:appName) for auto-update
             dl_url = f"{self.api_url}/download/latest/{self.name}"
+            info.download_url = dl_url
+        except Exception as e:
+            logger.error(f"[AUTO-UPDATE] Exception in check_for_updates: {e}")
+            info.download_url = f"{self.api_url}/download/latest/{self.name}"
+            info.update_available = True
 
-        info.download_url = dl_url
-        self.update_info  = info
+        self.update_info = info
         return info
 
     def perform_update(self, info: "UpdateInfo") -> bool:
         """
-        Download the update binary to <current_exe>.new, then spawn it with
-        --authlx-update-finish <current_exe> and exit, triggering Stage 2.
-        Works for Windows .exe, Linux ELF binary, and Python scripts.
+        In-place auto-updater:
+        1. Renames current running binary/script to <file>.old
+        2. Streams new release file directly to <file> path
+        3. Retries once after 10 seconds if initial download fails
+        4. Spawns updated file and exits old process
         """
-        if not info or not info.update_available:
-            logger.error("[AUTO-UPDATE] No update is available to install.")
-            return False
-
-        if not info.download_url:
-            logger.error(
-                "[AUTO-UPDATE] Cannot install update: no download URL is available.\n"
-                "  → Upload the update binary in your AuthLX Dashboard → Files section.\n"
-                "  💡 Tip: The auto_update_link must be a DIRECT download URL "
-                "(binary/executable), not a webpage."
-            )
-            return False
-
-        # Validate URL before downloading
-        logger.info(f"[AUTO-UPDATE] Validating download URL: {info.download_url}")
-        print(f"  💡 Tip: Make sure the URL above is a direct download link, not a webpage.")
-        is_valid, err_msg = self._validate_download_url(info.download_url)
-        if not is_valid:
-            logger.error(f"[AUTO-UPDATE] URL validation failed:\n{err_msg}")
-            logger.error(
-                "[AUTO-UPDATE] Continuing without update. "
-                "The application will keep running the current version."
-            )
+        if not info or not info.update_available or not info.download_url:
+            logger.error("[AUTO-UPDATE] Cannot install update: download URL empty or update not available.")
             return False
 
         current_exe = self.get_current_executable_path()
@@ -1585,55 +1565,62 @@ class api:
             logger.error("[AUTO-UPDATE] Could not determine current binary path.")
             return False
 
-        new_temp_path = current_exe + ".new"
-        logger.info(f"[AUTO-UPDATE] Downloading update from: {info.download_url}")
+        backup_exe = current_exe + ".old"
+        logger.info(f"[AUTO-UPDATE] Preparing file update for: {current_exe}")
+        logger.info(f"[AUTO-UPDATE] Renaming current binary to backup: {backup_exe}")
 
-        if not self._download_file_http(info.download_url, new_temp_path):
-            logger.error(
-                "[AUTO-UPDATE] Download failed. The application will keep running the current version.\n"
-                "  💡 Tip: Ensure the auto_update_link in your Dashboard is a direct download URL."
-            )
-            if os.path.exists(new_temp_path):
-                try:
-                    os.remove(new_temp_path)
-                except Exception:
-                    pass
+        try:
+            if os.path.exists(backup_exe):
+                os.remove(backup_exe)
+            os.replace(current_exe, backup_exe)
+        except Exception as e:
+            logger.warning(f"[AUTO-UPDATE] Rename self to .old failed ({e}). Attempting direct overwrite...")
+
+        logger.info(f"[AUTO-UPDATE] Downloading update from: {info.download_url}")
+        download_ok = self._download_file_http(info.download_url, current_exe)
+
+        # If initial download fails or file is not found, wait 10 seconds and retry one last time
+        if not download_ok:
+            logger.warning("[AUTO-UPDATE] File download failed or not found! Waiting 10 seconds before final retry attempt...")
+            time.sleep(10)
+
+            latest_fallback = f"{self.api_url}/download/latest/{self.name}"
+            logger.info(f"[AUTO-UPDATE] Retrying final download attempt from: {latest_fallback}")
+            download_ok = self._download_file_http(latest_fallback, current_exe)
+
+        if not download_ok:
+            logger.error("[AUTO-UPDATE] Final download retry failed! No latest release file available. Restoring backup and exiting...")
+            try:
+                if os.path.exists(backup_exe):
+                    if os.path.exists(current_exe):
+                        os.remove(current_exe)
+                    os.replace(backup_exe, current_exe)
+            except Exception:
+                pass
+            os._exit(1)
             return False
 
-        # On Linux, make the downloaded binary executable before spawning it
+        logger.info("[AUTO-UPDATE] Download completed successfully! Launching updated executable...")
+
+        # On Linux/macOS, make executable
         if platform.system() != "Windows":
             try:
-                os.chmod(new_temp_path, 0o755)
+                os.chmod(current_exe, 0o755)
             except Exception:
                 pass
 
-        logger.info("[AUTO-UPDATE] Download complete. Spawning updater process...")
-
         try:
-            if new_temp_path.lower().endswith(".py"):
-                # Script: run through current Python interpreter
-                cmd = [sys.executable, new_temp_path,
-                       "--authlx-update-finish", current_exe]
-            elif self._is_frozen():
-                # Compiled binary (PyInstaller/Nuitka) — run directly
-                cmd = [new_temp_path, "--authlx-update-finish", current_exe]
+            if current_exe.lower().endswith(".py"):
+                cmd = [sys.executable, current_exe] + sys.argv[1:]
             else:
-                # Plain Python running a non-.py path (unusual) — use interpreter
-                cmd = [sys.executable, new_temp_path,
-                       "--authlx-update-finish", current_exe]
+                cmd = [current_exe] + sys.argv[1:]
 
             subprocess.Popen(cmd, close_fds=True, start_new_session=True)
-
-            logger.info("[AUTO-UPDATE] Updater spawned. Exiting current process.")
+            logger.info("[AUTO-UPDATE] Updated executable launched successfully. Exiting old process...")
             os._exit(0)
             return True
         except Exception as e:
-            logger.error(f"[AUTO-UPDATE] Failed to spawn updater process: {e}")
-            if os.path.exists(new_temp_path):
-                try:
-                    os.remove(new_temp_path)
-                except Exception:
-                    pass
+            logger.error(f"[AUTO-UPDATE] Failed to launch updated executable: {e}")
             return False
 
 
