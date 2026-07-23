@@ -338,12 +338,20 @@ class api:
                 time.sleep(5)
                 os._exit(1)
 
-            if server_version != self.version:
+            def clean_ver(v: str) -> str:
+                if not v:
+                    return ""
+                v = str(v).strip()
+                if v.lower().startswith("v"):
+                    v = v[1:]
+                return v
+
+            if clean_ver(server_version) != clean_ver(self.version):
                 logger.critical("\n[UPDATE REQUIRED] Application version is outdated!")
                 logger.critical(f"  Current: {self.version}  |  Required: {server_version}")
                 
                 if self.auto_update_enabled:
-                    logger.info(f"[AUTO-UPDATE] Initiating auto-update to v{server_version}...")
+                    logger.info(f"[AUTO-UPDATE] Initiating auto-update to {server_version}...")
                     info = self.check_for_updates()
                     if info.update_available:
                         self.perform_update(info)
