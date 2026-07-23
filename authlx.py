@@ -1489,30 +1489,41 @@ class api:
         dl_url = ""
         file_n = ""
 
-        # 1. Query /init — may return auto_update_link and version
-        response = self._do_request("/init", payload)
-        if response and response.get("status") == "success":
-            app_info   = response.get("app_info") or {}
-            latest_ver = app_info.get("version", "")
-            dl_url     = app_info.get("auto_update_link", "")
-
-        # 2. Query /file/latest — authoritative release info
+        # 1. Query /file/latest first — authoritative latest release file info from Files manager
         file_res = self._do_request("/file/latest", payload)
         if file_res and file_res.get("status") == "success":
             data     = file_res.get("data") or {}
             file_obj = data.get("file") or {}
             if file_obj:
-                if not latest_ver:
-                    latest_ver = file_obj.get("version_tag", "")
-                if not dl_url:
-                    dl_url = file_obj.get("download_url", "")
-                if not file_n:
-                    file_n = file_obj.get("name", "")
+                latest_ver = file_obj.get("version_tag", "")
+                dl_url     = file_obj.get("download_url", "")
+                file_n     = file_obj.get("name", "")
+
+        # 2. Query /init — fallback for app_info
+        response = self._do_request("/init", payload)
+        if response and response.get("status") == "success":
+            app_info   = response.get("app_info") or {}
+            if not latest_ver:
+                latest_ver = app_info.get("version", "")
+            if not dl_url:
+                dl_url     = app_info.get("auto_update_link", "")
 
         info.latest_version = latest_ver or self.version
         info.file_name      = file_n
 
-        if info.latest_version and info.latest_version != self.version:
+        # Version comparison with leading 'v'/'V' normalization
+        def clean_ver(v: str) -> str:
+            if not v:
+                return ""
+            v = v.strip()
+            if v.lower().startswith("v"):
+                v = v[1:]
+            return v
+
+        clean_current = clean_ver(self.version)
+        clean_latest = clean_ver(info.latest_version)
+
+        if info.latest_version and clean_latest != clean_current:
             info.update_available = True
             if not dl_url:
                 logger.warning(
@@ -1522,8 +1533,9 @@ class api:
                     f"  💡 Tip: Set a direct download link as the auto_update_link "
                     f"(not a webpage, not a redirect page)."
                 )
-                # Fallback: try the generic download endpoint
-                dl_url = f"{self.api_url}/file/latest/download?app_id={self.ownerid}"
+                dl_url = f"{self.api_url}/download/latest/{self.name}"
+        elif not dl_url:
+            dl_url = f"{self.api_url}/download/latest/{self.name}"
 
         info.download_url = dl_url
         self.update_info  = info
