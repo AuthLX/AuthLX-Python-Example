@@ -103,7 +103,7 @@ HASH_OVERRIDE = None    # None = auto-compute real SHA-256 of this binary
 #       ownerid       = APP_ID,
 #       version       = APP_VERSION,
 #       client_secret = APP_CLIENT_SECRET,
-#       api_url       = "https://your-own-server.com/api/v1/client",
+#       api_url       = "https://your-own-server.com/api/v2/client",
 #   )
 
 # ═══════════════════════════════════════════════════════════════════

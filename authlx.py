@@ -254,7 +254,7 @@ class api:
             else others.get_checksum()
         )
 
-        self.api_url: str = api_url or "https://authlx.com/api/v1/client"
+        self.api_url: str = api_url or "https://api.authlx.com/api/v2/client"
 
         # Per-instance HTTP session — trust_env=False disables proxy auto-config
         self._session = requests.Session()
@@ -771,7 +771,18 @@ class api:
             "/verify-session",
             {"app_id": self.ownerid, "token": self.session_token},
         )
-        return bool(response and response.get("status") == "success")
+        if response and response.get("status") == "success":
+            data = response.get("data", {})
+            
+            # v2: Enriched session refresh
+            if not data.get("is_valid", False):
+                return False
+                
+            self.user_data.subscription = data.get("subscription", self.user_data.subscription)
+            self.user_data.expires = data.get("expiry", self.user_data.expires)
+            return True
+            
+        return False
 
     def verify_token(self, standalone_token: str) -> bool:
         """
@@ -1138,6 +1149,27 @@ class api:
 
             if self._debug:
                 logger.debug(f"← {resp.status_code}  {resp.text[:200]}")
+
+            # ── SRP (Signed Response Protocol) Verification ──────────────
+            # This makes MITM response spoofing mathematically impossible.
+            if self._client_secret:
+                sig_header = resp.headers.get("X-Response-Sig")
+                nonce_header = resp.headers.get("X-Response-Nonce")
+                
+                if not sig_header or not nonce_header:
+                    logger.critical("\n[SECURITY] Missing SRP headers from server! MITM Interception Detected.")
+                    os._exit(1)
+                    
+                expected_sig = hmac.new(
+                    self._client_secret.encode("utf-8"),
+                    f"{resp.text}:{nonce_header}".encode("utf-8"),
+                    hashlib.sha256
+                ).hexdigest()
+                
+                if not hmac.compare_digest(expected_sig, sig_header):
+                    logger.critical("\n[SECURITY] SRP Signature mismatch! Server response was spoofed.")
+                    os._exit(1)
+            # ─────────────────────────────────────────────────────────────
 
             try:
                 return resp.json()
