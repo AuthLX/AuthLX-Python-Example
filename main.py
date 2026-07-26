@@ -126,7 +126,15 @@ def init_sdk() -> api:
         hash_to_check = HASH_OVERRIDE,       # None = auto-compute (production)
     )
 
-    # Restrict all HTTP to the AuthLX domain (optional host-locking)
+    # Restrict all HTTP to the AuthLX domain (host-locking anti-MITM)
+    authlxapp.set_allowed_hosts(["api.authlx.com"])
+
+    # Optional TLS Certificate Pinning (chain-aware)
+    # Cloudflare / Google Trust Services (GTS Root R1)
+    authlxapp.add_pinned_cert("d947432abde7b7fa90fc2e6b59101b1280e0e1c7e4e40fa3c6887fff57a7f4cf")
+    # Baltimore CyberTrust Root (Cloudflare legacy fallback)
+    authlxapp.add_pinned_cert("16af57a9f676b0ab126095aa5ebafc57b8c71b6ab4945d81b85bbd13c77148a0")
+
     # If APP_CLIENT_SECRET is missing, it falls back to OFF MODE (no hash check).
     mode = "SECURE (HMAC + TOFU Hash)" if APP_CLIENT_SECRET else "OFF (no hash check)"
     print(f"✓ Initialised in {mode} mode.")

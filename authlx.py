@@ -88,6 +88,7 @@ A production-ready client SDK for the AuthLX authentication platform.
 
 import os
 import sys
+import json
 import time
 import hmac
 import shutil
@@ -139,6 +140,68 @@ class UpdateInfo:
         self.download_url: str      = ""
         self.file_name: str         = ""
         self.release_notes: str     = ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   PinnedCertAdapter  --  custom TLS cert pinning validation adapter
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class PinnedCertAdapter(requests.adapters.HTTPAdapter):
+    """Intercepts HTTPS connections to verify peer certificate against pinned hashes."""
+    def __init__(self, api_instance, *args, **kwargs):
+        self.api_instance = api_instance
+        super().__init__(*args, **kwargs)
+
+    def build_response(self, req, resp):
+        response = super().build_response(req, resp)
+        
+        # Verify cert chain if pinning hashes are provided
+        if self.api_instance._pinned_cert_hashes:
+            try:
+                sock = resp._connection.sock
+                if sock:
+                    actual_hashes = []
+                    pin_matched = False
+                    
+                    # 1. Try to get verified certificate chain (Python 3.10+)
+                    if hasattr(sock, "get_verified_chain"):
+                        try:
+                            chain = sock.get_verified_chain()
+                            if chain:
+                                for cert_bytes in chain:
+                                    h = hashlib.sha256(cert_bytes).hexdigest().lower()
+                                    actual_hashes.append(h)
+                                    if h in self.api_instance._pinned_cert_hashes:
+                                        pin_matched = True
+                                        break
+                        except Exception as e:
+                            logger.debug(f"get_verified_chain failed: {e}")
+                            
+                    # 2. Fallback: check only the leaf certificate (Python < 3.10)
+                    if not pin_matched:
+                        try:
+                            der_cert = sock.getpeercert(binary_form=True)
+                            if der_cert:
+                                leaf_hash = hashlib.sha256(der_cert).hexdigest().lower()
+                                if leaf_hash not in actual_hashes:
+                                    actual_hashes.append(leaf_hash)
+                                if leaf_hash in self.api_instance._pinned_cert_hashes:
+                                    pin_matched = True
+                        except Exception as e:
+                            logger.debug(f"getpeercert failed: {e}")
+                            
+                    if not pin_matched:
+                        logger.critical("[SECURITY] TLS Certificate Chain Pinning FAILED! MITM Detected.")
+                        for h in actual_hashes:
+                            logger.critical(f"[SECURITY] Chain Cert Hash: {h}")
+                        os._exit(1)
+                else:
+                    logger.critical("[SECURITY] Could not verify TLS Certificate. Connection dropped.")
+                    os._exit(1)
+            except Exception as e:
+                logger.critical(f"[SECURITY] Certificate validation error: {e}")
+                os._exit(1)
+                
+        return response
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -259,6 +322,7 @@ class api:
         # Per-instance HTTP session — trust_env=False disables proxy auto-config
         self._session = requests.Session()
         self._session.trust_env = False   # Anti-MITM: ignore system proxy settings
+        self._session.mount("https://", PinnedCertAdapter(self))
 
         # Auth state
         self.session_token: str  = ""
@@ -280,6 +344,7 @@ class api:
         # Security options
         self._allowed_hosts: list       = []
         self._pinned_public_keys: list  = []
+        self._pinned_cert_hashes: list  = []
 
         # Ban monitor
         self._ban_monitor_thread: threading.Thread = None
@@ -963,6 +1028,14 @@ class api:
         """Remove all TLS public-key pins."""
         self._pinned_public_keys = []
 
+    def add_pinned_cert(self, sha256_hash: str):
+        """Add a single TLS Certificate SHA-256 fingerprint pin."""
+        if not sha256_hash:
+            return
+        sha256_hash = sha256_hash.strip().lower()
+        if sha256_hash not in self._pinned_cert_hashes:
+            self._pinned_cert_hashes.append(sha256_hash)
+
     def req(self, url: str, method: str = "GET", **kwargs):
         """
         Hardened HTTP wrapper that enforces host-locking on arbitrary URLs.
@@ -1151,23 +1224,45 @@ class api:
                 logger.debug(f"← {resp.status_code}  {resp.text[:200]}")
 
             # ── SRP (Signed Response Protocol) Verification ──────────────
+            # The server signs the *canonicalized* JSON body (keys sorted
+            # alphabetically, no extra spaces) before sending it.  We must
+            # re-serialize with the same ordering or the HMAC will differ.
             # This makes MITM response spoofing mathematically impossible.
             if self._client_secret:
-                sig_header = resp.headers.get("X-Response-Sig")
+                sig_header   = resp.headers.get("X-Response-Sig")
                 nonce_header = resp.headers.get("X-Response-Nonce")
-                
+
                 if not sig_header or not nonce_header:
                     logger.critical("\n[SECURITY] Missing SRP headers from server! MITM Interception Detected.")
                     os._exit(1)
-                    
+
+                # Canonicalize: parse body and re-serialize with sorted keys
+                # (mirrors nlohmann::json / SimpleJson.SerializeCanonical behaviour)
+                try:
+                    canonical_body = json.dumps(
+                        json.loads(resp.text),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                except (ValueError, TypeError):
+                    # Not valid JSON — use the raw body as-is
+                    canonical_body = resp.text
+
+                payload      = f"{canonical_body}:{nonce_header}"
                 expected_sig = hmac.new(
                     self._client_secret.encode("utf-8"),
-                    f"{resp.text}:{nonce_header}".encode("utf-8"),
-                    hashlib.sha256
+                    payload.encode("utf-8"),
+                    hashlib.sha256,
                 ).hexdigest()
-                
+
                 if not hmac.compare_digest(expected_sig, sig_header):
                     logger.critical("\n[SECURITY] SRP Signature mismatch! Server response was spoofed.")
+                    logger.critical(f"[SECURITY] client_secret : {self._client_secret}")
+                    logger.critical(f"[SECURITY] payload       : {payload}")
+                    logger.critical(f"[SECURITY] expected_sig  : {expected_sig}")
+                    logger.critical(f"[SECURITY] sig_header    : {sig_header}")
+                    logger.critical(f"[SECURITY] nonce_header  : {nonce_header}")
                     os._exit(1)
             # ─────────────────────────────────────────────────────────────
 
